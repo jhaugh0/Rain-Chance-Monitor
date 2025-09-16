@@ -7,6 +7,7 @@ import json
 import urequests as r
 from neopixel import NeoPixel
 
+REPO = 'https://github.com/jhaugh0/Rain-Chance-Monitor'
 CONFIG_FILE = "config.json"
 LED = {
     "ON_HOUR"  : 7,
@@ -21,11 +22,11 @@ NETWORK = {
     "INTERNET_CHECK_RETRY_SECONDS" : 5
 }
 
+
 if os.uname().sysname == 'esp32':
     GPIO_PIN = 35 #M0
 elif os.uname().sysname == 'rp2':
     GPIO_PIN = 0
-    PICO = True
 else:
     GPIO_PIN = 0
 
@@ -34,6 +35,20 @@ NP = NeoPixel(PIN, LED['TOTAL_COUNT'])
 RTC = machine.RTC()
 Wlan = network.WLAN(network.STA_IF)
 AccuweatherKey = ''
+
+def get_github_version():
+    try:
+        response = r.get('https://api.github.com/repos/jhaugh0/Rain-Chance-Monitor/branches/main', headers={'user-agent':os.uname().sysname})
+        return response.json()['commit']['sha']
+    except:
+        return None
+
+def get_latest_version():
+    request = r.get('https://raw.githubusercontent.com/jhaugh0/Rain-Chance-Monitor/refs/heads/main/main.py', headers={'user-agent':os.uname().sysname})
+    if request.content:
+        with open('main.py', 'w') as f:
+            f.write(request.content)
+        machine.reset()
 
 def get_local_config():
     global NETWORK
@@ -92,7 +107,7 @@ def manage_wifi(action='connect'):
             set_LEDs(color='off')
             Wlan.active(True)
             Wlan.connect(NETWORK['SSID'], NETWORK['PSK'])
-            if PICO:
+            if os.uname().sysname == 'rp2':
                 Wlan.config(pm = 0xa11140)
             start_pin = 0
             while True:

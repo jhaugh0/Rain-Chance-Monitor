@@ -9,6 +9,7 @@ from neopixel import NeoPixel
 
 REPO = 'https://github.com/jhaugh0/Rain-Chance-Monitor'
 CONFIG_FILE = "config.json"
+VERSION_TRACKER_FILE = 'version.txt'
 LED = {
     "ON_HOUR"  : 7,
     "OFF_HOUR" : 22,
@@ -36,19 +37,41 @@ RTC = machine.RTC()
 Wlan = network.WLAN(network.STA_IF)
 AccuweatherKey = ''
 
-def get_github_version():
+def get_github_version_hash():
     try:
+        print('Trying to get latest github repo version hash')
         response = r.get('https://api.github.com/repos/jhaugh0/Rain-Chance-Monitor/branches/main', headers={'user-agent':os.uname().sysname})
-        return response.json()['commit']['sha']
-    except:
+        version = response.json()['commit']['sha']
+        print(f'  >> {version} retrieved')
+        return version
+    except Exception as e:
+        print(f'  >> Failed. Error: {e}')
         return None
 
 def get_latest_version():
+    print('Getting latest version of main.py')
     request = r.get('https://raw.githubusercontent.com/jhaugh0/Rain-Chance-Monitor/refs/heads/main/main.py', headers={'user-agent':os.uname().sysname})
-    if request.content:
+    if request.status_code == 200:
+        print(f'Request succeeded, new file is {len(request.content)} long')
+        print('Writing new file')
         with open('main.py', 'w') as f:
             f.write(request.content)
+        print('Resetting')
         machine.reset()
+        
+def check_for_updates():
+    if VERSION_TRACKER_FILE in os.listdir():
+        try:
+            with open(VERSION_TRACKER_FILE, 'r') as f:
+                version = f.read()
+        except Exception as e:
+            print(f'Failed to read version file. error: {e}')
+            return
+    else:
+        version = '0'
+    latest_version = get_github_version_hash()
+    if version != latest_version:
+        get_latest_version()
 
 def get_local_config():
     print('Getting config from local file')
@@ -285,6 +308,7 @@ def main_loop():
         set_LEDs(color='off')
         manage_wifi(action='disconnect')
         return
+    check_for_updates()
     pinData = create_pin_dict()
     weatherJSON = get_accuweather_data()
     hoursMap = extract_precip_chance_from_accuweather(weatherJSON)

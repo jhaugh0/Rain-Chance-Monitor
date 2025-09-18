@@ -53,17 +53,22 @@ def get_latest_version():
     request = r.get('https://raw.githubusercontent.com/jhaugh0/Rain-Chance-Monitor/refs/heads/main/main.py', headers={'user-agent':os.uname().sysname})
     if request.status_code == 200:
         print(f'Request succeeded, new file is {len(request.content)} long')
-        print('Writing new file')
-        with open('main.py', 'w') as f:
-            f.write(request.content)
-        print('Resetting')
-        machine.reset()
-        
+        return request.content
+
+def write_new_version(file, version):
+    print('Writing new version file')
+    with open(VERSION_TRACKER_FILE, 'w') as f:
+        f.write(version)
+    print('Writing new main.py')
+    with open('main.py', 'w') as f:
+        f.write(file)
+
 def check_for_updates():
     if VERSION_TRACKER_FILE in os.listdir():
         try:
             with open(VERSION_TRACKER_FILE, 'r') as f:
                 version = f.read()
+            print(f'version {version} found on disk')
         except Exception as e:
             print(f'Failed to read version file. error: {e}')
             return
@@ -71,7 +76,10 @@ def check_for_updates():
         version = '0'
     latest_version = get_github_version_hash()
     if version != latest_version:
-        get_latest_version()
+        content = get_latest_version()
+        write_new_version(file=content, version=latest_version)
+        print('Resetting')
+        machine.reset()
 
 def get_local_config():
     print('Getting config from local file')

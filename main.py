@@ -51,6 +51,7 @@ def get_latest_version():
         machine.reset()
 
 def get_local_config():
+    print('Getting config from local file')
     global NETWORK
     global ACCUWEATHER_API_KEY
     global LATITUDE
@@ -62,6 +63,7 @@ def get_local_config():
     ACCUWEATHER_API_KEY = config['ACCUWEATHER_API_KEY']
     LATITUDE = config['LATITUDE']
     LONGITUDE = config['LONGITUDE']
+    print('  >> Loaded!')
 
 def make_network_request_with_retry(url, message):
     print(f'  Making GET request to {url}')
@@ -261,6 +263,7 @@ def generate_hours_map():
         HOURS_MAP = list(range(LED['FIRST_HOUR'], LED['FIRST_HOUR']+LED['TOTAL_COUNT']))
 
 def main_loop():
+    get_local_config()
     print('Starting Main Loop')
     manage_wifi('connect')
     validate_internet_connection()

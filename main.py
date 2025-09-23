@@ -14,8 +14,7 @@ LED = {
     "ON_HOUR"  : 7,
     "OFF_HOUR" : 22,
     "TOTAL_COUNT" : 15,
-    "FIRST_HOUR" : 8,
-    "STEP_DIRECTION" : "backwards"
+    "FIRST_HOUR" : 8
 }
 NETWORK = {
     "MAX_REQUEST_RETRIES" : 5,
@@ -46,12 +45,14 @@ def get_user_config():
     api_key = read_input('Enter your Accuweather API Key: ')
     latitude = read_input('Enter your Latitude (e.g. 40.712776): ')
     longitude = read_input('Enter your Longitude (e.g. -74.005974): ')
+    cable_side = read_input('Which side is the cable coming out of? enter \'right\' or \'left\'')
     config = {
         'SSID' : ssid,
         'PSK' : psk,
         'ACCUWEATHER_API_KEY' : api_key,
         'LATITUDE' : latitude,
-        'LONGITUDE' : longitude
+        'LONGITUDE' : longitude,
+        'CABLE_SIDE' : cable_side
     }
     with open(CONFIG_FILE, 'w') as f:
         f.write(json.dumps(config))
@@ -109,6 +110,7 @@ def get_local_config():
     global ACCUWEATHER_API_KEY
     global LATITUDE
     global LONGITUDE
+    global TIME_REGION
     with open(CONFIG_FILE, 'r') as f:
         config = json.load(f)
     NETWORK['SSID'] = config['SSID']
@@ -116,6 +118,8 @@ def get_local_config():
     ACCUWEATHER_API_KEY = config['ACCUWEATHER_API_KEY']
     LATITUDE = config['LATITUDE']
     LONGITUDE = config['LONGITUDE']
+    LED['CABLE_SIDE'] = config['CABLE_SIDE']
+    TIME_REGION = config['TIME_REGION']
     print('  >> Loaded!')
 
 def make_network_request_with_retry(url, message):
@@ -134,13 +138,24 @@ def make_network_request_with_retry(url, message):
         if retries == NETWORK['MAX_REQUEST_RETRIES']:
             return None
 
-def get_local_time():
+def get_local_timeapi_time():
     print('Getting local time from timeapi')
     url = 'https://timeapi.io/api/time/current/coordinate'
     url = url + '?latitude=' + LATITUDE
     url = url + '&longitude=' + LONGITUDE
     timeResponse = make_network_request_with_retry(url, 'Failed to get time')
     return timeResponse
+
+def get_local_worldtimeapi_time():
+    print('Getting local time from worldtimeapi')
+    url = 'http://worldtimeapi.org/api/timezone/'
+    url = url + TIME_REGION
+    response = make_network_request_with_retry(url, message='Failed to get time')
+    if response:
+        print(f'Local time {response['datetime']} returned')
+        hour = response['datetime'].split('T')[1].split(":")[0]
+        return int(hour)
+    return 0
 
 def get_current_time_in_RTC():
     now = time.localtime(time.time() - 14400)
@@ -193,6 +208,7 @@ def validate_internet_connection(tries_before_reconnect = 10, max_tries=20):
             response = r.get('https://ip.me')
             if response.status_code == 200:
                 print(f'  Internet appears to be connected, Public IP: {response.text.strip()}')
+                set_LEDs(color='blue', brightness=1)
                 return True
         except Exception as e:
             if retries % tries_before_reconnect == 0:
@@ -314,20 +330,19 @@ def get_seconds_to_next_hour():
 
 def generate_hours_map():
     global HOURS_MAP
-    if LED['STEP_DIRECTION'] == 'backwards':
+    if LED['CABLE_SIDE'] == 'right':
         HOURS_MAP = list(reversed(range(LED['FIRST_HOUR'], LED['FIRST_HOUR']+LED['TOTAL_COUNT'])))
     else:
         HOURS_MAP = list(range(LED['FIRST_HOUR'], LED['FIRST_HOUR']+LED['TOTAL_COUNT']))
 
 def main_loop():
-    get_local_config()
     print('Starting Main Loop')
     manage_wifi('connect')
     validate_internet_connection()
     update_RTC()
-    localTime = get_local_time()
+    currentHour = get_local_worldtimeapi_time()
     get_accuweather_key()
-    if localTime['hour'] >= LED['OFF_HOUR'] or localTime['hour'] < LED['ON_HOUR']:
+    if currentHour >= LED['OFF_HOUR'] or currentHour < LED['ON_HOUR']:
         #
         #if localTime['hour'] == LED['OFF_HOUR']:
         #    seconds_to_on_time = (24 - LED['OFF_HOUR'] + LED['ON_HOUR']) * 60 * 60
@@ -361,6 +376,7 @@ def main_loop():
 def main():
     print('Starting up....')
     set_LEDs(color='cyan', brightness=20)
+    get_local_config()
     generate_hours_map()
     while True:
         main_loop()

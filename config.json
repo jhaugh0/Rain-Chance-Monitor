@@ -3,5 +3,7 @@
     "PSK" : "",
     "ACCUWEATHER_API_KEY" : "",
     "LATITUDE" : "",
-    "LONGITUDE" : ""
+    "LONGITUDE" : "",
+    "CABLE_SIDE" : "right",
+    "TIME_REGION" : "America/New_York"
 }

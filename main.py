@@ -34,7 +34,7 @@ PIN = machine.Pin(GPIO_PIN, machine.Pin.OUT)
 NP = NeoPixel(PIN, LED['TOTAL_COUNT'])
 RTC = machine.RTC()
 Wlan = network.WLAN(network.STA_IF)
-AccuweatherKey = ''
+ACCUWEATHER_LOCATION_KEY = ''
 
 def get_user_config():
     import sys
@@ -94,6 +94,9 @@ def check_for_updates():
     else:
         version = '0'
     latest_version = get_github_version_hash()
+    if latest_version == '':
+        print('Failed getting newest version hash')
+        return
     if version != latest_version:
         content = get_latest_version()
         write_new_version(file=content, version=latest_version)
@@ -120,18 +123,19 @@ def make_network_request_with_retry(url, message):
     retries = 0
     while retries < NETWORK['MAX_REQUEST_RETRIES']:
         try:
-            response = r.get(url).json()
-            return response
+            response = r.get(url)
+            return response.json()
         except:
             print(f'  {message}, retry {retries}/{NETWORK['MAX_REQUEST_RETRIES']}')
             retries = retries + 1
             print(f'  Pausing {NETWORK['REQUEST_RETRY_DELAY_SECONDS']} seconds before next attempt')
             time.sleep(NETWORK['REQUEST_RETRY_DELAY_SECONDS'])
+        print(f'  >> status code: {response.status_code}')
         if retries == NETWORK['MAX_REQUEST_RETRIES']:
             return None
 
 def get_local_time():
-    print('Getting time from timeapi')
+    print('Getting local time from timeapi')
     url = 'https://timeapi.io/api/time/current/coordinate'
     url = url + '?latitude=' + LATITUDE
     url = url + '&longitude=' + LONGITUDE
@@ -160,6 +164,7 @@ def manage_wifi(action='connect'):
             Wlan.active(True)
             Wlan.connect(NETWORK['SSID'], NETWORK['PSK'])
             if os.uname().sysname == 'rp2':
+                print('Disabling rp2 specific WiFi power saving settings')
                 Wlan.config(pm = 0xa11140)
             start_pin = 0
             while True:
@@ -169,7 +174,7 @@ def manage_wifi(action='connect'):
                     time.sleep(1)
                 else:
                     print('Connected!')
-                    set_LEDs(color='white', brightness=2)
+                    set_LEDs(color='white', brightness=1)
                     break
         else:
             print(f"Already connected to wifi: {str(Wlan.ifconfig())}")
@@ -193,6 +198,8 @@ def validate_internet_connection(tries_before_reconnect = 10, max_tries=20):
             if retries % tries_before_reconnect == 0:
                 print(f'  Internet connection not functional yet. Retry #{retries}. Reconnecting wifi to troubleshoot')
                 manage_wifi('disconnect')
+                print('Delaying 20 seconds')
+                time.sleep(20)
                 manage_wifi('connect')
             elif retries == max_tries:
                 print(f'  Internet connection not functional yet. Hit max retry count of {max_tries}')
@@ -221,8 +228,8 @@ def update_RTC():
     #RTC.datetime(get_current_time_in_RTC())
 
 def get_accuweather_key():
-    global AccuweatherKey
-    if AccuweatherKey != '':
+    global ACCUWEATHER_LOCATION_KEY
+    if ACCUWEATHER_LOCATION_KEY != '':
         return
     print('Getting Accuweather location key')
     url = 'http://dataservice.accuweather.com/locations/v1/cities/geoposition/search?'
@@ -230,11 +237,11 @@ def get_accuweather_key():
     url = url + '&q=' + LATITUDE + '%2C' + LONGITUDE
     response = make_network_request_with_retry(url, 'Failed to get weather key')
     key = str(response['Key'])
-    AccuweatherKey = key
+    ACCUWEATHER_LOCATION_KEY = key
 
 def get_accuweather_data():
     print('Getting Weather Data')
-    url = 'http://dataservice.accuweather.com/forecasts/v1/hourly/12hour/' + AccuweatherKey + '?'
+    url = 'http://dataservice.accuweather.com/forecasts/v1/hourly/12hour/' + ACCUWEATHER_LOCATION_KEY + '?'
     url = url + '&apikey=' + ACCUWEATHER_API_KEY
     response = make_network_request_with_retry(url, 'Failed to get weather data')
     return response

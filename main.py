@@ -23,7 +23,6 @@ NETWORK = {
     "INTERNET_CHECK_RETRY_SECONDS" : 5
 }
 
-
 if os.uname().sysname == 'esp32':
     GPIO_PIN = 35 #M0
 elif os.uname().sysname == 'rp2':
@@ -36,6 +35,26 @@ NP = NeoPixel(PIN, LED['TOTAL_COUNT'])
 RTC = machine.RTC()
 Wlan = network.WLAN(network.STA_IF)
 AccuweatherKey = ''
+
+def get_user_config():
+    import sys
+    def read_input(prompt):
+        string = sys.stdin.readline()
+        return string.strip()
+    ssid = read_input('Enter your WiFi SSID: ')
+    psk = read_input('Enter your WiFi Password: ')
+    api_key = read_input('Enter your Accuweather API Key: ')
+    latitude = read_input('Enter your Latitude (e.g. 40.712776): ')
+    longitude = read_input('Enter your Longitude (e.g. -74.005974): ')
+    config = {
+        'SSID' : ssid,
+        'PSK' : psk,
+        'ACCUWEATHER_API_KEY' : api_key,
+        'LATITUDE' : latitude,
+        'LONGITUDE' : longitude
+    }
+    with open(CONFIG_FILE, 'w') as f:
+        f.write(json.dumps(config))
 
 def get_github_version_hash():
     try:

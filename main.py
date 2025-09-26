@@ -19,9 +19,7 @@ else:
     GPIO_PIN = 0
 
 PIN = machine.Pin(GPIO_PIN, machine.Pin.OUT)
-NP = NeoPixel(PIN, CONFIG['LED']['TOTAL_COUNT'])
 RTC = machine.RTC()
-Wlan = network.WLAN(network.STA_IF)
 ACCUWEATHER_LOCATION_KEY = ''
 
 class Check_for_updates():
@@ -86,7 +84,7 @@ class Check_for_updates():
         else:
             print(f'No new version found\n  Current version: {current_version}\n  Latest version:  {latest_version}')
 
-def write_user_config(config=CONFIG):
+def write_user_config(config):
     with open(CONFIG_FILE, 'w') as f:
         f.write(json.dumps(config))
 
@@ -168,18 +166,18 @@ def get_current_time_in_RTC():
 def manage_wifi(action='connect', useLEDs=True):
     if action == 'connect':
         print('Connecting WiFi')
-        if not Wlan.isconnected():
+        if not WLAN.isconnected():
             if useLEDs:
                 set_LEDs(color='off')
-            Wlan.active(True)
-            Wlan.connect(CONFIG['NETWORK']['SSID'], CONFIG['NETWORK']['PSK'])
+            WLAN.active(True)
+            WLAN.connect(CONFIG['NETWORK']['SSID'], CONFIG['NETWORK']['PSK'])
             if os.uname().sysname == 'rp2':
                 print('Disabling rp2 specific WiFi power saving settings')
-                Wlan.config(pm = 0xa11140)
+                WLAN.config(pm = 0xa11140)
             start_pin = 0
             while True:
-                print(f'    IP: {Wlan.ifconfig()[0]}')
-                if Wlan.ifconfig()[0] == '0.0.0.0':
+                print(f'    IP: {WLAN.ifconfig()[0]}')
+                if WLAN.ifconfig()[0] == '0.0.0.0':
                     if useLEDs:
                         start_pin = set_LEDs(startPin=start_pin, brightness=5)
                     time.sleep(1)
@@ -189,13 +187,13 @@ def manage_wifi(action='connect', useLEDs=True):
                         set_LEDs(color='white', brightness=1)
                     break
         else:
-            print(f"Already connected to wifi: {str(Wlan.ifconfig())}")
+            print(f"Already connected to wifi: {str(WLAN.ifconfig())}")
             return
     elif action == 'disconnect':
         print('Disconnecting WiFi')
-        Wlan.disconnect()
+        WLAN.disconnect()
         print('Disabling WiFi')
-        Wlan.active(False)
+        WLAN.active(False)
 
 def validate_internet_connection(tries_before_reconnect = 10, max_tries=20):
     print('Validating public internet connection')
@@ -378,8 +376,11 @@ def main_loop():
     return
 
 def main():
+    global NP, WLAN
     print('Starting up....')
     get_local_config()
+    NP = NeoPixel(PIN, CONFIG['LED']['TOTAL_COUNT'])
+    WLAN = network.WLAN(network.STA_IF)
     set_LEDs(color='cyan', brightness=20)
     generate_hours_map()
     while True:

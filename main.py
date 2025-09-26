@@ -379,8 +379,8 @@ def main_loop():
 
 def main():
     print('Starting up....')
-    set_LEDs(color='cyan', brightness=20)
     get_local_config()
+    set_LEDs(color='cyan', brightness=20)
     generate_hours_map()
     while True:
         main_loop()

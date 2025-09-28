@@ -176,7 +176,7 @@ def manage_wifi(action='connect', useLEDs=True):
                 WLAN.config(pm = 0xa11140)
             start_pin = 0
             while True:
-                print(f'    IP: {WLAN.ifconfig()[0]}')
+                print(f'    IP: {WLAN.ifconfig()[0]}. StartPin: {start_pin}')
                 if WLAN.ifconfig()[0] == '0.0.0.0':
                     if useLEDs:
                         start_pin = set_LEDs(startPin=start_pin, brightness=5)
@@ -295,7 +295,7 @@ def set_LEDs(color='', hoursMap={}, brightness=50, startPin=0):
     elif startPin is not None:
         if startPin >= CONFIG['LED']['TOTAL_COUNT']:
             # reset all LEDs
-            set_LEDs(color='off')
+            set_LEDs(color='off', startPin=None)
             return 0
         NP[startPin] = colors['cyan']
         NP.write()

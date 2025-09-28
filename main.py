@@ -173,7 +173,7 @@ def manage_wifi(action='connect', useLEDs=True):
             WLAN.connect(CONFIG['NETWORK']['SSID'], CONFIG['NETWORK']['PSK'])
             if os.uname().sysname == 'rp2':
                 print('Disabling rp2 specific WiFi power saving settings')
-                WLAN.config(pm = 0xa11140)
+                Wlan.config(pm = 0xa11140)
             start_pin = 0
             while True:
                 print(f'    IP: {WLAN.ifconfig()[0]}')
@@ -223,12 +223,12 @@ def validate_internet_connection(tries_before_reconnect = 10, max_tries=20):
 
 def update_RTC():
     print('Updating RTC time')
-    print("  Local time before synchronization：%s" %str(time.localtime()))
+    print("  Local time before synchronization %s" %str(time.localtime()))
     retries = 0
     while retries < CONFIG['NETWORK']['MAX_REQUEST_RETRIES']:
         try:
             ntptime.settime()
-            print("  Local time after synchronization：%s" %str(time.localtime()))
+            print("  Local time after synchronization %s" %str(time.localtime()))
             return
         except:
             print(f'  Failed to get NTP time, retry {retries+1}/{CONFIG['NETWORK']['MAX_REQUEST_RETRIES']}')
@@ -259,7 +259,16 @@ def get_accuweather_data():
     response = make_network_request_with_retry(url, 'Failed to get weather data')
     return response
 
-def set_LEDs(hoursMap={}, brightness=50, color='cyan', startPin=0):
+def set_LEDs(hoursMap={}, multi=False, brightness=50, color='', loading=False, startPin=0):
+    def get_color(rain_chance, colors):
+        if rain_chance is None:
+            return colors['off']
+        if rain_chance < 30:
+            return colors['green']
+        elif rain_chance >= 30 and rain_chance < 55:
+            return colors['yellow'] 
+        elif rain_chance >= 55:
+            return colors['red']
     #idiot check
     if brightness > 100:
         brightness = 100
@@ -292,10 +301,10 @@ def set_LEDs(hoursMap={}, brightness=50, color='cyan', startPin=0):
             pinNumber = HOURS_MAP.index(hour)
             print(f'  Setting pin {pinNumber} to color {color} for chance {value}')
             NP[pinNumber] = color
-    elif startPin:
-        if startPin >= CONFIG['LED']['TOTAL_COUNT']:
-            # reset all LEDs
-            set_LEDs(color='off')
+    elif loading:
+        if startPin >= LED['TOTAL_COUNT']:
+            NP.fill((0,0,0))
+            NP.write()
             return 0
         NP[startPin] = colors['cyan']
         NP.write()

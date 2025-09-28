@@ -259,7 +259,7 @@ def get_accuweather_data():
     response = make_network_request_with_retry(url, 'Failed to get weather data')
     return response
 
-def set_LEDs(color='cyan', hoursMap={}, brightness=50, startPin=0):
+def set_LEDs(color='', hoursMap={}, brightness=50, startPin=0):
     #idiot check
     if brightness > 100:
         brightness = 100
@@ -280,9 +280,9 @@ def set_LEDs(color='cyan', hoursMap={}, brightness=50, startPin=0):
             return colors['off']
         if rain_chance < 30:
             return colors['green']
-        elif rain_chance >= 30 and rain_chance < 55:
+        elif rain_chance >= 30 and rain_chance < 50:
             return colors['yellow'] 
-        elif rain_chance >= 55:
+        elif rain_chance >= 50:
             return colors['red']
 
     if hoursMap:

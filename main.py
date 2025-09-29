@@ -259,7 +259,7 @@ def get_accuweather_data():
     response = make_network_request_with_retry(url, 'Failed to get weather data')
     return response
 
-def set_LEDs(color='', hoursMap={}, brightness=50, startPin=None):
+def set_LEDs(color='', hoursMap={}, brightness=50, startPin=None, RGBValue=(0,0,0)):
     #idiot check
     print(f'Setting LEDs to: color {color}, brightness: {brightness}, startPin {startPin}')
     if brightness > 100:
@@ -302,6 +302,8 @@ def set_LEDs(color='', hoursMap={}, brightness=50, startPin=None):
         NP.write()
         startPin += 1
         return startPin
+    elif RGBValue != (0,0,0):
+        NP.fill(RGBValue)
     else:
         NP.fill(colors[color])
     NP.write()

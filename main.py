@@ -259,8 +259,9 @@ def get_accuweather_data():
     response = make_network_request_with_retry(url, 'Failed to get weather data')
     return response
 
-def set_LEDs(color='', hoursMap={}, brightness=50, startPin=0):
+def set_LEDs(color='', hoursMap={}, brightness=50, startPin=None):
     #idiot check
+    print(f'Setting LEDs to: color {color}, brightness: {brightness}, startPin {startPin}')
     if brightness > 100:
         brightness = 100
     brightness = round(255 * (brightness * .01))

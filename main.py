@@ -142,7 +142,7 @@ def get_local_worldtimeapi_time():
     print('Getting local time from worldtimeapi')
     url = 'http://worldtimeapi.org/api/timezone/'
     url = url + CONFIG['LOCATION']['TIME_REGION']
-    response = make_network_request_with_retry(url, message='Failed to get time')
+    response = make_network_request_with_retry(url=url, message='Failed to get time')
     if response:
         print(f'Local time {response['datetime']} returned')
         hour = response['datetime'].split('T')[1].split(":")[0]
@@ -265,7 +265,6 @@ def set_LEDs(color='', hoursMap={}, brightness=50, startPin=None, RGBValue=(0,0,
     if brightness > 100:
         brightness = 100
     brightness = round(255 * (brightness * .01))
-    
     colors = {
         'red' : (brightness,0,0),
         'green' : (0,brightness,0),
@@ -275,7 +274,6 @@ def set_LEDs(color='', hoursMap={}, brightness=50, startPin=None, RGBValue=(0,0,
         'white' : (brightness, brightness, brightness),
         'off' : (0,0,0)
     }
-    
     def get_color(rain_chance, colors):
         if rain_chance is None:
             return colors['off']
@@ -285,7 +283,6 @@ def set_LEDs(color='', hoursMap={}, brightness=50, startPin=None, RGBValue=(0,0,
             return colors['yellow'] 
         elif rain_chance >= 50:
             return colors['red']
-
     if hoursMap:
         for hour in hoursMap:
             value = hoursMap[hour]

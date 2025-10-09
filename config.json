@@ -12,13 +12,19 @@
         "TIME_REGION" : "America/New_York"
     },
     "ACCUWEATHER_API_KEY" : "",
-    "WEATHERAPI_API_KEY" : "",
-    "PROVIDER" : "weatherapi",
+    "WEATHERAPI_API_KEY" : "1b58981f75d14d9c87e21453230208",
+    "PROVIDER" : "weathergov",
     "LED" : {
         "CABLE_SIDE" : "right",
+        "TEMP_STRIP": true,
+        "RAIN_GPIO_PIN" : 35,
+        "TEMP_GPIO_PIN" : 37,
         "ON_HOUR" : 7,
         "OFF_HOUR" : 22,
         "FIRST_BAR_HOUR" : 8,
-        "TOTAL_COUNT" : 15
+        "TOTAL_COUNT" : 15,
+        "BRIGHTNESS" : 20,
+        "YELLOW_THRESHOLD_START" : 30,
+        "RED_TRHRESHOLD_START" : 50
     }
 }

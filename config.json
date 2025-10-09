@@ -12,7 +12,7 @@
         "TIME_REGION" : "America/New_York"
     },
     "ACCUWEATHER_API_KEY" : "",
-    "WEATHERAPI_API_KEY" : "1b58981f75d14d9c87e21453230208",
+    "WEATHERAPI_API_KEY" : "",
     "PROVIDER" : "weathergov",
     "LED" : {
         "CABLE_SIDE" : "right",

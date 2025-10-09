@@ -10,128 +10,213 @@ from neopixel import NeoPixel
 REPO = 'jhaugh0/Rain-Chance-Monitor'
 CONFIG_FILE = "config.json"
 VERSION_TRACKER_FILE = 'version.txt'
+RUN_LOG = 'run.log'
+ERROR_LOG = 'error.log'
+Run_Log = ''
 
-if os.uname().sysname == 'esp32':
-    GPIO_PIN = 35 #M0
-elif os.uname().sysname == 'rp2':
-    GPIO_PIN = 0
-else:
-    GPIO_PIN = 0
-
-PIN = machine.Pin(GPIO_PIN, machine.Pin.OUT)
 RTC = machine.RTC()
 ACCUWEATHER_LOCATION_KEY = ''
 
 class Check_for_updates():
     def __init__(self):
-        print('Initializing update checker')
+        log('Initializing update checker')
         self.Main_file_url = 'https://raw.githubusercontent.com/' + REPO + '/refs/heads/main/main.py'
         self.Version_hash_url = 'https://api.github.com/repos/' + REPO + '/branches/main'
         self.Request_headers = {'user-agent':os.uname().sysname}
     def get_version_from_disk(self):
-        print('Getting version from disk')
+        log('Getting version from disk')
         if VERSION_TRACKER_FILE in os.listdir():
             try:
                 with open(VERSION_TRACKER_FILE, 'r') as f:
                     version = f.read()
-                print(f'  >> {version} found on disk')
+                log(f'  >> {version} found on disk')
             except Exception as e:
-                print(f'  >> Failed to read version file. error: {e}')
+                log(f'  >> Failed to read version file. error: {e}')
                 return
         else:
-            print('  >> No version file found on disk, assuming version 0')
+            log('  >> No version file found on disk, assuming version 0')
             version = '0'
         return version
     def get_version_from_github(self):
         try:
-            print('Trying to get latest github repo version hash')
+            log('Trying to get latest github repo version hash')
             response = r.get(self.Version_hash_url, headers=self.Request_headers)
             version = response.json()['commit']['sha']
-            print(f'  >> {version} retrieved')
+            log(f'  >> {version} retrieved')
             return version
         except Exception as e:
-            print(f'  >> Failed. Error: {e}')
+            log(f'  >> Failed. Error: {e}')
             return ''
     def get_latest_file_version(self):
-        print('Getting latest version of main.py')
+        log('Getting latest version of main.py')
         request = r.get(self.Main_file_url, headers=self.Request_headers)
         if request.status_code == 200:
-            print(f'  >> Request succeeded, new file is {len(request.content)} chars long')
+            log(f'  >> Request succeeded, new file is {len(request.content)} chars long')
             return request.content
-        print('  >> Failed getting latest version of main.py')
+        log('  >> Failed getting latest version of main.py')
         return ''
     def write_new_version(self, file, version):
-        print('Writing new version file')
+        log('Writing new version file')
         with open(VERSION_TRACKER_FILE, 'w') as f:
             f.write(version)
-        print('Writing new main.py')
+        log('Writing new main.py')
         with open('main.py', 'w') as f:
             f.write(file)
     def main(self):
         current_version = self.get_version_from_disk()
         latest_version = self.get_version_from_github()
         if latest_version == '':
-            print('Failed getting newest version hash')
+            log('Failed getting newest version hash')
             return
         if current_version != latest_version:
-            print(f'New version found\n  Current version: {current_version}\n  New version:     {latest_version}')
+            log(f'New version found\n  Current version: {current_version}\n  New version:     {latest_version}')
             content = self.get_latest_file_version()
             if content == '':
                 return
             self.write_new_version(file=content, version=latest_version)
-            print('Resetting')
+            log('Resetting')
             machine.reset()
         else:
-            print(f'No new version found\n  Current version: {current_version}\n  Latest version:  {latest_version}')
+            log(f'No new version found\n  Current version: {current_version}\n  Latest version:  {latest_version}')
+
+class WeatherAPI():
+    def __init__(self):
+        self.api_key = CONFIG['WEATHERAPI_API_KEY']
+    def get_forecast(self):
+        log('Getting Weather Data from weatherapi')
+        url = "http://api.weatherapi.com/v1/forecast.json"
+        url = url + "?key=" + self.api_key + "&q=" + CONFIG['LOCATION']['LATITUDE'] + "," + CONFIG['LOCATION']['LONGITUDE']
+        url = url + "&days=1" + "&aqi=no" + "&alerts=no" + "&hour_fields=chance_of_rain,will_it_rain,feelslike_f"
+        request = r.get(url)
+        localtime = request.json()['location']['localtime']
+        forecast = request.json()['forecast']['forecastday'][0]['hour']
+        return forecast
+    def map_hours_data(self, forecast):
+        log('Mapping weatherapi hour data')
+        hours = {}
+        for hourData in forecast:
+            hour = int(hourData['time'].split(' ')[1].split(':')[0])
+            hours[hour] = {}
+            hours[hour]['rain'] = hourData['chance_of_rain']
+            hours[hour]['temp'] = hourData['temp_f']
+        log(f'Returned data: {hours}')
+        return hours
+    def main(self):
+        forecast = self.get_forecast()
+        hourMap = self.map_hours_data(forecast)
+        return hourMap
+
+class Accuweather():
+    def __init__(self):
+        self.api_key = CONFIG['ACCUWEATHER_API_KEY']
+    def get_location_key(self):
+        global ACCUWEATHER_LOCATION_KEY
+        if ACCUWEATHER_LOCATION_KEY != '':
+            return
+        log('Getting Accuweather location key')
+        url = 'http://dataservice.accuweather.com/locations/v1/cities/geoposition/search?'
+        url = url + '&apikey=' + self.api_key
+        url = url + '&q=' + CONFIG['LOCATION']['LATITUDE'] + '%2C' + CONFIG['LOCATION']['LONGITUDE']
+        response = make_network_request_with_retry(url, 'Failed to get weather key')
+        key = str(response['Key'])
+        ACCUWEATHER_LOCATION_KEY = key
+    def get_data(self):
+        log('Getting Weather Data')
+        url = 'http://dataservice.accuweather.com/forecasts/v1/hourly/12hour/' + ACCUWEATHER_LOCATION_KEY + '?'
+        url = url + '&apikey=' + CONFIG['ACCUWEATHER_API_KEY']
+        response = make_network_request_with_retry(url, 'Failed to get weather data')
+        return response
+    def extract_precip_chance(self, rJson):
+        log('Extracting precip chance from response')
+        hours = {}
+        for hourData in rJson:
+            hour = int(hourData['DateTime'].split('T')[1].split(':')[0])
+            hours[hour] = {}
+            hours[hour]['rain'] = hourData['PrecipitationProbability']
+        log(f'Returned data: {hours}')
+        return hours
+    def main(self):
+        self.get_location_key()
+        weatherJSON = self.get_data()
+        hourMap = self.extract_precip_chance(weatherJSON)
+        return hourMap
+
+class WeatherGOV():
+    def __init__(self):
+        log('Getting Weather Data from weather.gov')
+        self.base = 'https://api.weather.gov'
+        self.latitude = str(round(float(CONFIG['LOCATION']['LATITUDE']), 4))
+        self.longitude = str(round(float(CONFIG['LOCATION']['LONGITUDE']), 4))
+        self.headers = {'user-agent':'jordan@haugh.one'}
+    def get_point(self):
+        log('  >> Getting point data/endpoint by geo coords')
+        url = self.base + '/points/' + self.latitude + ',' + self.longitude
+        point = r.get(url, headers=self.headers)
+        forecast_endpoint = point.json()['properties']['forecastHourly']
+        return forecast_endpoint
+    def get_forecast(self, endpoint):
+        log('  >> Getting forecast data from endpoint')
+        forecast = r.get(endpoint, headers=self.headers)
+        return forecast.json()
+    def filter_forecast(self, forecast):
+        log('  >> Filtering forecast data')
+        hours = {}
+        for hourData in forecast['properties']['periods']:
+            day = int(hourData['startTime'].split('T')[0].split('-')[2])
+            hour = int(hourData['startTime'].split('T')[1].split(':')[0])
+            if day != DAY and hour == HOUR:
+                print(f'    >> Data from time {hourData['startTime']} is too far outside the usable range, stopping loop')
+                break
+            hours[hour] = {}
+            hours[hour]['rain'] = hourData['probabilityOfPrecipitation']['value']
+            hours[hour]['temp'] = hourData['temperature']
+        return hours
+    def main(self):
+        endpoint = self.get_point()
+        forecast = self.get_forecast(endpoint)
+        filtered = self.filter_forecast(forecast)
+        return filtered
+
+def init_neopixel():
+    log('Initializing NeoPixel Variables')
+    global NP
+    NP = {}
+    rain_pin = machine.Pin(CONFIG['LED']['RAIN_GPIO_PIN'], machine.Pin.OUT)
+    NP['RAIN'] = NeoPixel(rain_pin, CONFIG['LED']['TOTAL_COUNT'])
+    if CONFIG['LED']['TEMP_STRIP']:
+        temp_pin = machine.Pin(CONFIG['LED']['TEMP_GPIO_PIN'], machine.Pin.OUT)
+        NP['TEMP'] = NeoPixel(temp_pin, CONFIG['LED']['TOTAL_COUNT'])
 
 def write_user_config(config):
     with open(CONFIG_FILE, 'w') as f:
         f.write(json.dumps(config))
 
-def get_weatherdata_api_data():
-    print('Getting Weather Data from weatherapi')
-    url = "http://api.weatherapi.com/v1/forecast.json"
-    url = url + "?key=" + CONFIG['WEATHERAPI_API_KEY'] + "&q=" + CONFIG['LOCATION']['LATITUDE'] + "," + CONFIG['LOCATION']['LONGITUDE']
-    url = url + "&days=1" + "&aqi=no" + "&alerts=no" + "&hour_fields=chance_of_rain,will_it_rain,feelslike_f"
-    request = r.get(url)
-    localtime = request.json()['location']['localtime']
-    forecast = request.json()['forecast']['forecastday'][0]['hour']
-    return localtime, forecast
-
-def extract_precip_chance_from_weatherapi(forecast):
-    print('Mapping weatherapi data')
-    hours = {}
-    for hourData in forecast:
-        hour = int(hourData['time'].split(' ')[1].split(':')[0])
-        hours[hour] = hourData['chance_of_rain']
-    print(f'Returned data: {hours}')
-    return hours
-
 def get_local_config():
-    print('Getting config from local file')
+    log('Getting config from local file')
     global CONFIG
     with open(CONFIG_FILE, 'r') as f:
         CONFIG = json.load(f)
-    print('  >> Loaded!')
+    log('  >> Loaded!')
 
 def make_network_request_with_retry(url, message):
-    print(f'  Making GET request to {url}')
+    log(f'  Making GET request to {url}')
     retries = 0
     while retries < CONFIG['NETWORK']['MAX_REQUEST_RETRIES']:
         try:
             response = r.get(url)
             return response.json()
         except:
-            print(f'  {message}, retry {retries}/{CONFIG['NETWORK']['MAX_REQUEST_RETRIES']}')
+            log(f'  {message}, retry {retries}/{CONFIG['NETWORK']['MAX_REQUEST_RETRIES']}')
             retries = retries + 1
-            print(f'  Pausing {CONFIG['NETWORK']['REQUEST_RETRY_DELAY_SECONDS']} seconds before next attempt')
+            log(f'  Pausing {CONFIG['NETWORK']['REQUEST_RETRY_DELAY_SECONDS']} seconds before next attempt')
             time.sleep(CONFIG['NETWORK']['REQUEST_RETRY_DELAY_SECONDS'])
-        print(f'  >> status code: {response.status_code}')
+        if 'response' in locals():
+            log(f'  >> status code: {response.status_code}')
         if retries == CONFIG['NETWORK']['MAX_REQUEST_RETRIES']:
             return None
 
 def get_local_timeapi_time():
-    print('Getting local time from timeapi')
+    log('Getting local time from timeapi')
     url = 'https://timeapi.io/api/time/current/coordinate'
     url = url + '?latitude=' + CONFIG['LOCATION']['LATITUDE']
     url = url + '&longitude=' + CONFIG['LOCATION']['LONGITUDE']
@@ -139,15 +224,15 @@ def get_local_timeapi_time():
     return timeResponse
 
 def get_local_worldtimeapi_time():
-    print('Getting local time from worldtimeapi')
+    log('Getting local time from worldtimeapi')
     url = 'http://worldtimeapi.org/api/timezone/'
     url = url + CONFIG['LOCATION']['TIME_REGION']
-    response = make_network_request_with_retry(url=url, message='Failed to get time')
+    response = make_network_request_with_retry(url, message='Failed to get time')
     if response:
-        print(f'Local time {response['datetime']} returned')
-        hour = response['datetime'].split('T')[1].split(":")[0]
-        return int(hour)
-    return 0
+        global HOUR, DAY
+        log(f'  >> Local time {response['datetime']} returned')
+        HOUR = int(response['datetime'].split('T')[1].split(":")[0])
+        DAY = int(response['datetime'].split('T')[0].split("-")[2])
 
 def get_current_time_in_RTC():
     now = time.localtime(time.time() - 14400)
@@ -165,160 +250,182 @@ def get_current_time_in_RTC():
 
 def manage_wifi(action='connect', useLEDs=True):
     if action == 'connect':
-        print('Connecting WiFi')
+        log('Connecting WiFi')
+        log(f'  Using wifi info:\n    SSID: {CONFIG['NETWORK']['SSID']}\n    PSK:  {CONFIG['NETWORK']['PSK']}')
         if not WLAN.isconnected():
             if useLEDs:
                 set_LEDs(color='off')
             WLAN.active(True)
+            time.sleep(.5)
+            WLAN.scan()
             WLAN.connect(CONFIG['NETWORK']['SSID'], CONFIG['NETWORK']['PSK'])
             if os.uname().sysname == 'rp2':
-                print('Disabling rp2 specific WiFi power saving settings')
+                log('Disabling rp2 specific WiFi power saving settings')
                 WLAN.config(pm = 0xa11140)
             start_pin = 0
             while True:
-                print(f'    IP: {WLAN.ifconfig()[0]}. StartPin: {start_pin}')
+                log(f'    IP: {WLAN.ifconfig()[0]}. StartPin: {start_pin}')
                 if WLAN.ifconfig()[0] == '0.0.0.0':
                     if useLEDs:
-                        start_pin = set_LEDs(startPin=start_pin, brightness=5)
+                        start_pin = set_LEDs(strip=NP['RAIN'], color='cyan', startPin=start_pin, brightness=5)
                     time.sleep(1)
                 else:
-                    print('Connected!')
+                    log('Connected!')
+                    log(f'  >> IP: {WLAN.ifconfig()[0]}')
                     if useLEDs:
                         set_LEDs(color='white', brightness=1)
                     break
         else:
-            print(f"Already connected to wifi: {str(WLAN.ifconfig())}")
+            log(f"Already connected to wifi: {str(WLAN.ifconfig())}")
             return
     elif action == 'disconnect':
-        print('Disconnecting WiFi')
+        log('Disconnecting WiFi')
         WLAN.disconnect()
-        print('Disabling WiFi')
+        log('Disabling WiFi')
         WLAN.active(False)
 
 def validate_internet_connection(tries_before_reconnect = 10, max_tries=20):
-    print('Validating public internet connection')
+    log('Validating public internet connection')
     retries = 0
     while True:
         try:
             response = r.get('https://ip.me')
             if response.status_code == 200:
-                print(f'  Internet appears to be connected, Public IP: {response.text.strip()}')
+                log(f'  Internet appears to be connected, Public IP: {response.text.strip()}')
                 set_LEDs(color='blue', brightness=1)
                 return True
         except Exception as e:
-            if retries % tries_before_reconnect == 0:
-                print(f'  Internet connection not functional yet. Retry #{retries}/{max_tries}. Reconnecting wifi to troubleshoot')
+            if retries == max_tries:
+                log(f'  Internet connection not functional yet. Hit max retry count of {max_tries}')
+                log('\n\nResetting completely.')
+                machine.reset()
+            if retries % tries_before_reconnect == 0 and retries != 0:
+                log(f'  Internet connection not functional yet. Retry #{retries}/{max_tries}. Reconnecting wifi to troubleshoot')
                 manage_wifi('disconnect')
-                print('Delaying 20 seconds')
+                log('Delaying 20 seconds')
                 time.sleep(20)
                 manage_wifi('connect')
-            elif retries == max_tries:
-                print(f'  Internet connection not functional yet. Hit max retry count of {max_tries}')
-                return False
             else:
-                print(f'  Internet connection not functional yet. Retry #{retries}/{max_tries}. Trying again in {CONFIG['NETWORK']['INTERNET_CHECK_RETRY_SECONDS']} seconds')
-                print(f'Error: {e}')
+                log(f'  Internet connection not functional yet. Retry #{retries}/{max_tries}. Trying again in {CONFIG['NETWORK']['INTERNET_CHECK_RETRY_SECONDS']} seconds')
+                log(f'Error: {e}')
             time.sleep(CONFIG['NETWORK']['INTERNET_CHECK_RETRY_SECONDS'])
             retries = retries + 1
 
 def update_RTC():
-    print('Updating RTC time')
-    print("  Local time before synchronization：%s" %str(time.localtime()))
+    log('Updating RTC time')
+    log("  Local time before synchronization：%s" %str(time.localtime()))
     retries = 0
     while retries < CONFIG['NETWORK']['MAX_REQUEST_RETRIES']:
         try:
             ntptime.settime()
-            print("  Local time after synchronization：%s" %str(time.localtime()))
+            log("  Local time after synchronization：%s" %str(time.localtime()))
             return
         except:
-            print(f'  Failed to get NTP time, retry {retries+1}/{CONFIG['NETWORK']['MAX_REQUEST_RETRIES']}')
+            log(f'  Failed to get NTP time, retry {retries+1}/{CONFIG['NETWORK']['MAX_REQUEST_RETRIES']}')
             retries = retries + 1
-            print(f'  Pausing {CONFIG['NETWORK']['REQUEST_RETRY_DELAY_SECONDS']} seconds before next attempt')
+            log(f'  Pausing {CONFIG['NETWORK']['REQUEST_RETRY_DELAY_SECONDS']} seconds before next attempt')
         if retries == CONFIG['NETWORK']['MAX_REQUEST_RETRIES']:
             return None
     #RTC.datetime(get_current_time_in_RTC())
 
-def get_accuweather_key():
-    if CONFIG['PROVIDER'] != 'accuweather':
-        return
-    global ACCUWEATHER_LOCATION_KEY
-    if ACCUWEATHER_LOCATION_KEY != '':
-        return
-    print('Getting Accuweather location key')
-    url = 'http://dataservice.accuweather.com/locations/v1/cities/geoposition/search?'
-    url = url + '&apikey=' + CONFIG['ACCUWEATHER_API_KEY']
-    url = url + '&q=' + CONFIG['LOCATION']['LATITUDE'] + '%2C' + CONFIG['LOCATION']['LONGITUDE']
-    response = make_network_request_with_retry(url, 'Failed to get weather key')
-    key = str(response['Key'])
-    ACCUWEATHER_LOCATION_KEY = key
-
-def get_accuweather_data():
-    print('Getting Weather Data')
-    url = 'http://dataservice.accuweather.com/forecasts/v1/hourly/12hour/' + ACCUWEATHER_LOCATION_KEY + '?'
-    url = url + '&apikey=' + CONFIG['ACCUWEATHER_API_KEY']
-    response = make_network_request_with_retry(url, 'Failed to get weather data')
-    return response
-
-def set_LEDs(color='', hoursMap={}, brightness=50, startPin=None, RGBValue=(0,0,0)):
+def set_LEDs(strip=None, pinMap={}, color='', brightness=50, RGBValue=(0,0,0), startPin=None, blueRedGradient=False):
+    log(f'Setting LEDs. Brightness: {brightness}')
     #idiot check
-    print(f'Setting LEDs to: color {color}, brightness: {brightness}, startPin {startPin}')
     if brightness > 100:
         brightness = 100
     brightness = round(255 * (brightness * .01))
+    log(f'  >> Brightness adjusted to {brightness}')
+    
+    def get_percentage(value):
+        return round(brightness * value)
+
     colors = {
-        'red' : (brightness,0,0),
-        'green' : (0,brightness,0),
-        'blue' : (0,0,brightness),
-        'yellow' : (brightness,brightness,0),
-        'cyan' : (0,brightness,brightness),
-        'white' : (brightness, brightness, brightness),
-        'off' : (0,0,0)
+        'red':    (brightness,          0,                   0                  ),
+        'green':  (0,                   brightness,          0                  ),
+        'blue':   (0,                   0,                   brightness         ),
+        'yellow': (brightness,          brightness,          0                  ),
+        'cyan':   (0,                   brightness,          brightness         ),
+        'white':  (brightness,          brightness,          brightness         ),
+        'off':    (0,                   0,                   0                  ),
+        '30':     (0,                   0,                   get_percentage(0.5)),
+        '40':     (get_percentage(0.1), get_percentage(0.2), get_percentage(0.5)),
+        '50':     (get_percentage(0.2), get_percentage(0.3), get_percentage(0.4)),
+        '60':     (get_percentage(0.3), get_percentage(0.5), get_percentage(0.3)),
+        '70':     (get_percentage(0.4), get_percentage(0.3), get_percentage(0.2)),
+        '80':     (get_percentage(0.5), get_percentage(0.2), get_percentage(0.1)),
+        '90':     (get_percentage(0.5), 0,                   0                  )
     }
-    def get_color(rain_chance, colors):
-        if rain_chance is None:
+    
+    def get_color(value, colors=colors):
+        if value is None:
             return colors['off']
-        if rain_chance < 30:
+        
+        if blueRedGradient:
+            if value < 30:
+                return colors['30']
+            elif value >= 30 and value < 40:
+                return colors['30']
+            elif value >= 40 and value < 50:
+                return colors['40']
+            elif value >= 50 and value < 60:
+                return colors['50']
+            elif value >= 60 and value < 70:
+                return colors['60']
+            elif value >= 70 and value < 80:
+                return colors['70']
+            elif value >= 80 and value < 90:
+                return colors['80']
+            elif value >= 90:
+                return colors['90']
+            else:
+                return colors['off']
+        
+        if value < CONFIG['LED']['YELLOW_THRESHOLD_START']:
             return colors['green']
-        elif rain_chance >= 30 and rain_chance < 50:
+        elif value >= CONFIG['LED']['YELLOW_THRESHOLD_START'] and value < CONFIG['LED']['RED_THRESHOLD_START']:
             return colors['yellow'] 
-        elif rain_chance >= 50:
+        elif value >= CONFIG['LED']['RED_THRESHOLD_START']:
             return colors['red']
-    if hoursMap:
-        for hour in hoursMap:
-            value = hoursMap[hour]
-            color = get_color(value, colors)
+        else:
+            return colors['off']
+
+    def set_all_strips(RGBValue):
+        for strip in NP.keys():
+            log(f'  Setting strip {strip} to value: {RGBValue}')
+            NP[strip].fill(RGBValue)
+            NP[strip].write()
+
+    if RGBValue != (0,0,0):
+        set_all_strips(RGBValue)
+        return
+    elif pinMap != {}:
+        for hour in pinMap:
+            value = pinMap[hour]
+            color = get_color(value)
             pinNumber = HOURS_MAP.index(hour)
-            print(f'  Setting pin {pinNumber} to color {color} for chance {value}')
-            NP[pinNumber] = color
+            log(f'  Setting pin {pinNumber} to color {color} for value {value}')
+            strip[pinNumber] = color
     elif startPin is not None:
+        log(f'  Setting LED pin {startPin} to: color {colors[color]}')
         if startPin >= CONFIG['LED']['TOTAL_COUNT']:
             # reset all LEDs
             set_LEDs(color='off', startPin=None)
             return 0
-        NP[startPin] = colors['cyan']
-        NP.write()
+        strip[startPin] = colors[color]
+        strip.write()
         startPin += 1
         return startPin
-    elif RGBValue != (0,0,0):
-        NP.fill(RGBValue)
     else:
-        NP.fill(colors[color])
-    NP.write()
-
-def extract_precip_chance_from_accuweather(rJson):
-    print('Extracting precip chance from response')
-    hours = {}
-    for hourData in rJson:
-        hour = int(hourData['DateTime'].split('T')[1].split(':')[0])
-        hours[hour] = hourData['PrecipitationProbability']
-    print(f'Returned data: {hours}')
-    return hours
+        log(f'  Setting all LEDs to {colors[color]}')
+        set_all_strips(colors[color])
+        return
+    strip.write()
 
 def create_pin_dict():
-    print('Initializing pin dictionary')
+    log('Initializing pin dictionary')
     pin_data = {}
     for hour in range(CONFIG['LED']['FIRST_BAR_HOUR'], CONFIG['LED']['FIRST_BAR_HOUR']+CONFIG['LED']['TOTAL_COUNT']):
-        pin_data[hour] = 0
+        pin_data[hour] = None
     return pin_data
 
 def get_seconds_to_next_hour():
@@ -329,7 +436,7 @@ def get_seconds_to_next_hour():
 
 def sleep_until_next_hour():
     delayTime = get_seconds_to_next_hour()
-    print(f'Will run again in {round(delayTime/60)} minutes, {delayTime%60} seconds')
+    log(f'Will run again in {round(delayTime/60)} minutes, {delayTime%60} seconds')
     time.sleep(delayTime)
 
 def generate_hours_map():
@@ -339,49 +446,102 @@ def generate_hours_map():
     else:
         HOURS_MAP = list(range(CONFIG['LED']['FIRST_BAR_HOUR'], CONFIG['LED']['FIRST_BAR_HOUR']+CONFIG['LED']['TOTAL_COUNT']))
 
-def main_loop():
-    print('Starting Main Loop')
-    manage_wifi('connect')
-    validate_internet_connection()
-    update_RTC()
-    currentHour = get_local_worldtimeapi_time()
-    get_accuweather_key()
-    if currentHour == CONFIG['LED']['OFF_HOUR']:
-        seconds_to_on_time = (24 - CONFIG['LED']['OFF_HOUR'] + CONFIG['LED']['ON_HOUR']) * 60 * 60
-        clock_drift_adjustment = round(seconds_to_on_time * .95)
-        print(f'Will run again in {round(clock_drift_adjustment/60)} minutes, {clock_drift_adjustment%60} seconds')
-        manage_wifi(action='disconnect', useLEDs=False)
-        time.sleep(clock_drift_adjustment)
-        manage_wifi(action='connect', useLEDs=False)
-        validate_internet_connection()
-        update_RTC()
-        sleep_until_next_hour()
-    Check_for_updates().main()
+def map_hours_to_pins():
     pinData = create_pin_dict()
     if CONFIG['PROVIDER'] == 'weatherapi':
-        localtime, forecast = get_weatherdata_api_data()
-        hoursMap = extract_precip_chance_from_weatherapi(forecast)
+        hoursMap = WeatherAPI().main()
     elif CONFIG['PROVIDER'] == 'accuweather':
-        weatherJSON = get_accuweather_data()
-        hoursMap = extract_precip_chance_from_accuweather(weatherJSON)
+        hoursMap = Accuweather().main()
+    elif CONFIG['PROVIDER'] == 'weathergov':
+        hoursMap = WeatherGOV().main()
     for hour in pinData:
         if hour in hoursMap.keys():
-            print(f'  Mapping hour {hour} to chance {hoursMap[hour]}')
+            log(f'  Mapping hour {hour} to {hoursMap[hour]}')
             pinData[hour] = hoursMap[hour]
         else:
-            print(f'  Mapping hour {hour} to chance None')
+            log(f'  Mapping hour {hour} to None')
             pinData[hour] = None
-    set_LEDs(hoursMap=pinData, brightness=20)
-    manage_wifi(action='disconnect')
-    return
+    return pinData
+
+def overnight_sleep():
+    seconds_to_on_time = (24 - CONFIG['LED']['OFF_HOUR'] + CONFIG['LED']['ON_HOUR']) * 60 * 60
+    clock_drift_adjustment = round(seconds_to_on_time * .95)
+    log(f'Will run again in {round(clock_drift_adjustment/60)} minutes, {clock_drift_adjustment%60} seconds')
+    set_LEDs(color='off')
+    manage_wifi(action='disconnect', useLEDs=False)
+    time.sleep(clock_drift_adjustment)
+    manage_wifi(action='connect', useLEDs=False)
+    validate_internet_connection()
+    update_RTC()
+    sleep_until_next_hour()
+
+def send_map_to_leds(pinData):
+    rainData = {}
+    for hour in pinData.keys():
+        value = pinData[hour]
+        rainData[hour] = value['rain']
+    set_LEDs(strip=NP['RAIN'], pinMap=rainData, brightness=CONFIG['LED']['BRIGHTNESS'])
+    if CONFIG['LED']['TEMP_STRIP']:
+        tempData = {}
+        for hour in pinData.keys():
+            value = pinData[hour]
+            tempData[hour] = value['temp']
+        set_LEDs(strip=NP['TEMP'], pinMap=tempData, brightness=CONFIG['LED']['BRIGHTNESS'], blueRedGradient=True)
+
+def write_error_log(message):
+    log('Writing error log')
+    with open(ERROR_LOG, 'w') as f:
+        f.write(message)
+
+def print_error_log():
+    if ERROR_LOG in os.listdir():
+        log('Printing error log')
+        with open(ERROR_LOG, 'r') as f:
+            print(f.read())
+
+def print_run_log():
+    if RUN_LOG in os.listdir():
+        log('Printing error log')
+        with open(RUN_LOG, 'r') as f:
+            print(f.read())
+
+def log(message, initialize=False, write_to_file=False):
+    global Run_Log
+    print(message)
+    if initialize:
+        Run_Log = message + '\n'
+        return
+    Run_Log = Run_Log + message + '\n'
+    if write_to_file:
+        with open(RUN_LOG, 'w') as f:
+            f.write(Run_Log)
+        return
+
+def main_loop():
+    log('Starting Main Loop', initialize=True)
+    try:
+        manage_wifi('connect')
+        validate_internet_connection()
+        update_RTC()
+        get_local_worldtimeapi_time()
+        if HOUR == CONFIG['LED']['OFF_HOUR']:
+            overnight_sleep()
+        #Check_for_updates().main()
+        hourMap = map_hours_to_pins()
+        send_map_to_leds(hourMap)
+        manage_wifi(action='disconnect')
+        return
+    except Exception as e:
+        write_error_log(str(e))
+        log(f'Error occurred: {e}', write_to_file=True)
 
 def main():
-    global NP, WLAN
+    global WLAN
     print('Starting up....')
     get_local_config()
-    NP = NeoPixel(PIN, CONFIG['LED']['TOTAL_COUNT'])
+    init_neopixel()
     WLAN = network.WLAN(network.STA_IF)
-    set_LEDs(color='cyan', brightness=20)
+    set_LEDs(color='cyan', brightness=10)
     generate_hours_map()
     while True:
         main_loop()

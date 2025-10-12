@@ -25,6 +25,6 @@
         "TOTAL_COUNT" : 15,
         "BRIGHTNESS" : 20,
         "YELLOW_THRESHOLD_START" : 30,
-        "RED_TRHRESHOLD_START" : 50
+        "RED_THRESHOLD_START" : 50
     }
 }

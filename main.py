@@ -24,57 +24,61 @@ class Check_for_updates():
         self.Version_hash_url = 'https://api.github.com/repos/' + REPO + '/branches/main'
         self.Request_headers = {'user-agent':os.uname().sysname}
     def get_version_from_disk(self):
-        log('Getting version from disk')
+        log('  >> Getting version from disk')
         if VERSION_TRACKER_FILE in os.listdir():
             try:
                 with open(VERSION_TRACKER_FILE, 'r') as f:
                     version = f.read()
-                log(f'  >> {version} found on disk')
+                log(f'    >> {version} found on disk')
             except Exception as e:
-                log(f'  >> Failed to read version file. error: {e}')
+                log(f'    >> Failed to read version file. error: {e}')
                 return
         else:
-            log('  >> No version file found on disk, assuming version 0')
+            log('    >> No version file found on disk, assuming version 0')
             version = '0'
         return version
     def get_version_from_github(self):
         try:
-            log('Trying to get latest github repo version hash')
+            log('  >> Trying to get latest github repo version hash')
             response = r.get(self.Version_hash_url, headers=self.Request_headers)
             version = response.json()['commit']['sha']
-            log(f'  >> {version} retrieved')
+            log(f'    >> {version} retrieved')
             return version
         except Exception as e:
-            log(f'  >> Failed. Error: {e}')
+            log(f'    >> Failed. Error: {e}')
             return ''
     def get_latest_file_version(self):
-        log('Getting latest version of main.py')
+        log('  Getting latest version of main.py')
         request = r.get(self.Main_file_url, headers=self.Request_headers)
         if request.status_code == 200:
-            log(f'  >> Request succeeded, new file is {len(request.content)} chars long')
+            log(f'    >> Request succeeded, new file is {len(request.content)} chars long')
             return request.content
-        log('  >> Failed getting latest version of main.py')
+        log('    >> Failed getting latest version of main.py')
         return ''
     def write_new_version(self, file, version):
-        log('Writing new version file')
+        log('    >> Writing new version file')
         with open(VERSION_TRACKER_FILE, 'w') as f:
             f.write(version)
-        log('Writing new main.py')
+        log('  >> Writing new main.py')
         with open('main.py', 'w') as f:
             f.write(file)
     def main(self):
+        if HOUR != CONFIG['LED']['ON_HOUR']:
+            log('  >> Not the ON_HOUR, skipping update check')
+            return
         current_version = self.get_version_from_disk()
         latest_version = self.get_version_from_github()
         if latest_version == '':
-            log('Failed getting newest version hash')
+            log('  >> Failed getting newest version hash')
             return
         if current_version != latest_version:
-            log(f'New version found\n  Current version: {current_version}\n  New version:     {latest_version}')
+            log(f'  >> New version found\n  Current version: {current_version}\n  New version:     {latest_version}')
             content = self.get_latest_file_version()
             if content == '':
+                log('  >> Failed getting latest main.py file, aborting update')
                 return
             self.write_new_version(file=content, version=latest_version)
-            log('Resetting')
+            log('\nResetting')
             machine.reset()
         else:
             log(f'No new version found\n  Current version: {current_version}\n  Latest version:  {latest_version}')
@@ -536,7 +540,7 @@ def main_loop():
         get_local_worldtimeapi_time()
         if HOUR == CONFIG['LED']['OFF_HOUR']:
             overnight_sleep()
-        #Check_for_updates().main()
+        Check_for_updates().main()
         hourMap = map_hours_to_pins()
         send_map_to_leds(hourMap)
         manage_wifi(action='disconnect')
@@ -558,6 +562,3 @@ def main():
         sleep_until_next_hour()
 
 main()
-
-
-# Get time from weathergov

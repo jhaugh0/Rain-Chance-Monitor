@@ -23,7 +23,7 @@
         "OFF_HOUR" : 22,
         "FIRST_BAR_HOUR" : 8,
         "TOTAL_COUNT" : 15,
-        "BRIGHTNESS" : 20,
+        "BRIGHTNESS" : 10,
         "YELLOW_THRESHOLD_START" : 30,
         "RED_THRESHOLD_START" : 50
     }

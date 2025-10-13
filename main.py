@@ -333,61 +333,64 @@ def set_LEDs(strip=None, pinMap={}, color='', brightness=50, RGBValue=(0,0,0), s
     #idiot check
     if brightness > 100:
         brightness = 100
-    brightness = round(255 * (brightness * .01))
     log(f'  >> Brightness adjusted to {brightness}')
     
-    def get_percentage(value):
-        return round(brightness * value)
-
-    colors = {
-        'red':    (brightness,          0,                   0                  ),
-        'green':  (0,                   brightness,          0                  ),
-        'blue':   (0,                   0,                   brightness         ),
-        'yellow': (brightness,          brightness,          0                  ),
-        'cyan':   (0,                   brightness,          brightness         ),
-        'white':  (brightness,          brightness,          brightness         ),
-        'off':    (0,                   0,                   0                  ),
-        '30':     (0,                   0,                   get_percentage(0.5)),
-        '40':     (get_percentage(0.1), get_percentage(0.2), get_percentage(0.5)),
-        '50':     (get_percentage(0.2), get_percentage(0.3), get_percentage(0.4)),
-        '60':     (get_percentage(0.3), get_percentage(0.5), get_percentage(0.3)),
-        '70':     (get_percentage(0.4), get_percentage(0.3), get_percentage(0.2)),
-        '80':     (get_percentage(0.5), get_percentage(0.2), get_percentage(0.1)),
-        '90':     (get_percentage(0.5), 0,                   0                  )
-    }
+    def get_color_tuple (color, brightness=brightness):
+        brightness = round(255 * (brightness * .01))
+        
+        def get_percentage(value):
+            return round(brightness * value)
+        
+        colors = {
+            'red':    (brightness,          0,                   0                  ),
+            'green':  (0,                   brightness,          0                  ),
+            'blue':   (0,                   0,                   brightness         ),
+            'yellow': (brightness,          brightness,          0                  ),
+            'cyan':   (0,                   brightness,          brightness         ),
+            'white':  (brightness,          brightness,          brightness         ),
+            'off':    (0,                   0,                   0                  ),
+            '30':     (0,                   0,                   get_percentage(0.5)),
+            '40':     (get_percentage(0.1), get_percentage(0.2), get_percentage(0.5)),
+            '50':     (get_percentage(0.2), get_percentage(0.3), get_percentage(0.4)),
+            '60':     (get_percentage(0.3), get_percentage(0.5), get_percentage(0.3)),
+            '70':     (get_percentage(0.4), get_percentage(0.3), get_percentage(0.2)),
+            '80':     (get_percentage(0.5), get_percentage(0.2), get_percentage(0.1)),
+            '90':     (get_percentage(0.5), 0,                   0                  )
+        }
+        return colors[color]
     
-    def get_color(value, colors=colors):
+    def get_color(value, brightness=brightness):
         if value is None:
-            return colors['off']
+            return get_color_tuple('off')
         
         if blueRedGradient:
             if value < 30:
-                return colors['30']
+                return get_color_tuple('30', brightness=brightness)
             elif value >= 30 and value < 40:
-                return colors['30']
+                return get_color_tuple('30', brightness=brightness)
             elif value >= 40 and value < 50:
-                return colors['40']
+                return get_color_tuple('40', brightness=brightness)
             elif value >= 50 and value < 60:
-                return colors['50']
+                return get_color_tuple('50', brightness=brightness)
             elif value >= 60 and value < 70:
-                return colors['60']
+                return get_color_tuple('60', brightness=brightness)
             elif value >= 70 and value < 80:
-                return colors['70']
+                return get_color_tuple('70', brightness=brightness)
             elif value >= 80 and value < 90:
-                return colors['80']
+                return get_color_tuple('80', brightness=brightness)
             elif value >= 90:
-                return colors['90']
+                return get_color_tuple('90', brightness=brightness)
             else:
-                return colors['off']
+                return get_color_tuple('off')
         
         if value < CONFIG['LED']['YELLOW_THRESHOLD_START']:
-            return colors['green']
+            return get_color_tuple('green', brightness=brightness)
         elif value >= CONFIG['LED']['YELLOW_THRESHOLD_START'] and value < CONFIG['LED']['RED_THRESHOLD_START']:
-            return colors['yellow'] 
+            return get_color_tuple('yellow', brightness=brightness)
         elif value >= CONFIG['LED']['RED_THRESHOLD_START']:
-            return colors['red']
+            return get_color_tuple('red', brightness=brightness)
         else:
-            return colors['off']
+            return get_color_tuple('off')
 
     def set_all_strips(RGBValue):
         for strip in NP.keys():
@@ -401,23 +404,30 @@ def set_LEDs(strip=None, pinMap={}, color='', brightness=50, RGBValue=(0,0,0), s
     elif pinMap != {}:
         for hour in pinMap:
             value = pinMap[hour]
-            color = get_color(value)
+            if hour == HOUR:
+                log(f'    >> current hour: {hour}, setting brightness to 100%')
+                color = get_color(value, brightness=100)
+            elif hour == HOUR - 1:
+                log(f'    >> Previous hour {hour}, setting brightness to 33%')
+                color = get_color(value, brightness=round(brightness/3))
+            else:
+                color = get_color(value)
             pinNumber = HOURS_MAP.index(hour)
             log(f'  Setting pin {pinNumber} to color {color} for value {value}')
             strip[pinNumber] = color
     elif startPin is not None:
-        log(f'  Setting LED pin {startPin} to: color {colors[color]}')
+        log(f'  Setting LED pin {startPin} to: color {get_color_tuple(color)}')
         if startPin >= CONFIG['LED']['TOTAL_COUNT']:
             # reset all LEDs
             set_LEDs(color='off', startPin=None)
             return 0
-        strip[startPin] = colors[color]
+        strip[startPin] = get_color_tuple(color)
         strip.write()
         startPin += 1
         return startPin
     else:
-        log(f'  Setting all LEDs to {colors[color]}')
-        set_all_strips(colors[color])
+        log(f'  Setting all LEDs to {get_color_tuple(color)}')
+        set_all_strips(get_color_tuple(color))
         return
     strip.write()
 
@@ -548,3 +558,6 @@ def main():
         sleep_until_next_hour()
 
 main()
+
+
+# Get time from weathergov

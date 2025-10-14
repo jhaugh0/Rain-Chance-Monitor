@@ -392,7 +392,9 @@ def set_LEDs(strip=None, pinMap={}, color='', brightness=50, RGBValue=(0,0,0), s
         if blueRed:
             rgb = round(color / 10.0) * 10
             index = 'blueRed_' + str(rgb)
-            return colors[index] if index in colors else colors['off']
+            rgbvalue = colors[index] if index in colors else colors['off']
+            log(f"      >> indexed to {index} : {str(rgbvalue)}")
+            return rgbvalue
         if greenRed:
             rgb = round(color / 10.0) * 10
             index = 'greenRed_' + str(rgb)

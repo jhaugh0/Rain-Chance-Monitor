@@ -14,7 +14,13 @@ RUN_LOG = 'run.log'
 ERROR_LOG = 'error.log'
 Run_Log = ''
 
+print('Getting config from local file')
+with open(CONFIG_FILE, 'r') as f:
+    CONFIG = json.load(f)
+print('  >> Loaded!')
+
 RTC = machine.RTC()
+WLAN = network.WLAN(network.STA_IF)
 ACCUWEATHER_LOCATION_KEY = ''
 
 class Check_for_updates():
@@ -179,7 +185,29 @@ class WeatherGOV():
         endpoint = self.get_point()
         forecast = self.get_forecast(endpoint)
         filtered = self.filter_forecast(forecast)
-        return filtered
+        return filtered   
+
+class Delay():
+    def get_seconds_to_next_hour(self):
+        minute_now = time.localtime()[4]
+        second_now = time.localtime()[5]
+        current = (minute_now * 60) + second_now
+        return 3600 - current
+    def sleep_until_next_hour(self):
+        delayTime = self.get_seconds_to_next_hour()
+        log(f'Will run again in {round(delayTime/60)} minutes, {delayTime%60} seconds')
+        time.sleep(delayTime)
+    def overnight_sleep(self):
+        seconds_to_on_time = (24 - CONFIG['LED']['OFF_HOUR'] + CONFIG['LED']['ON_HOUR']) * 60 * 60
+        clock_drift_adjustment = round(seconds_to_on_time * .95)
+        log(f'Will run again in {round(clock_drift_adjustment/60)} minutes, {clock_drift_adjustment%60} seconds')
+        set_LEDs(color='off')
+        manage_wifi(action='disconnect', useLEDs=False)
+        time.sleep(clock_drift_adjustment)
+        manage_wifi(action='connect', useLEDs=False)
+        validate_internet_connection()
+        update_RTC()
+        self.sleep_until_next_hour()
 
 def init_neopixel():
     log('Initializing NeoPixel Variables')
@@ -194,13 +222,6 @@ def init_neopixel():
 def write_user_config(config):
     with open(CONFIG_FILE, 'w') as f:
         f.write(json.dumps(config))
-
-def get_local_config():
-    log('Getting config from local file')
-    global CONFIG
-    with open(CONFIG_FILE, 'r') as f:
-        CONFIG = json.load(f)
-    log('  >> Loaded!')
 
 def make_network_request_with_retry(url, message):
     log(f'  Making GET request to {url}')
@@ -288,7 +309,7 @@ def manage_wifi(action='connect', useLEDs=True):
         log('Disabling WiFi')
         WLAN.active(False)
 
-def validate_internet_connection(tries_before_reconnect = 10, max_tries=20):
+def validate_internet_connection(tries_before_reconnect=10, max_tries=20):
     log('Validating public internet connection')
     retries = 0
     while True:
@@ -332,69 +353,51 @@ def update_RTC():
             return None
     #RTC.datetime(get_current_time_in_RTC())
 
-def set_LEDs(strip=None, pinMap={}, color='', brightness=50, RGBValue=(0,0,0), startPin=None, blueRedGradient=False):
-    log(f'Setting LEDs. Brightness: {brightness}')
-    #idiot check
+def set_LEDs(strip=None, pinMap={}, color='', brightness=50, RGBValue=(0,0,0), startPin=None, blueRed=False, greenRed=False):
     if brightness > 100:
-        brightness = 100
-    log(f'  >> Brightness adjusted to {brightness}')
-    
-    def get_color_tuple (color, brightness=brightness):
+        brightness = 100   
+    log(f'Setting LEDs. Brightness: {brightness}')
+
+    def get_color(color, brightness=brightness):
         brightness = round(255 * (brightness * .01))
-        
         def get_percentage(value):
             return round(brightness * value)
-        
         colors = {
-            'red':    (brightness,          0,                   0                  ),
-            'green':  (0,                   brightness,          0                  ),
-            'blue':   (0,                   0,                   brightness         ),
-            'yellow': (brightness,          brightness,          0                  ),
-            'cyan':   (0,                   brightness,          brightness         ),
-            'white':  (brightness,          brightness,          brightness         ),
-            'off':    (0,                   0,                   0                  ),
-            '30':     (0,                   0,                   get_percentage(0.5)),
-            '40':     (get_percentage(0.1), get_percentage(0.2), get_percentage(0.5)),
-            '50':     (get_percentage(0.2), get_percentage(0.3), get_percentage(0.4)),
-            '60':     (get_percentage(0.3), get_percentage(0.5), get_percentage(0.3)),
-            '70':     (get_percentage(0.4), get_percentage(0.3), get_percentage(0.2)),
-            '80':     (get_percentage(0.5), get_percentage(0.2), get_percentage(0.1)),
-            '90':     (get_percentage(0.5), 0,                   0                  )
+            'red':          (brightness,          0,                 0                 ),
+            'green':        (0,                   brightness,        0                 ),
+            'blue':         (0,                   0,                 brightness        ),
+            'yellow':       (brightness,          brightness,        0                 ),
+            'cyan':         (0,                   brightness,        brightness        ),
+            'white':        (brightness,          brightness,        brightness        ),
+            'off':          (0,                   0,                 0                 ),
+            'blueRed_30':   (0,                   0,                 get_percentage(1) ),
+            'blueRed_40':   (get_percentage(.1), get_percentage(.2), get_percentage(.9)),
+            'blueRed_50':   (get_percentage(.2), get_percentage(.3), get_percentage(.5)),
+            'blueRed_60':   (get_percentage(.3), get_percentage(.5), get_percentage(.3)),
+            'blueRed_70':   (get_percentage(.5), get_percentage(.3), get_percentage(.2)),
+            'blueRed_80':   (get_percentage(.9), get_percentage(.2), get_percentage(.1)),
+            'blueRed_90':   (get_percentage(1),  0,                  0                 ),
+            'greenRed_0':   (0,                  get_percentage(1),  0                 ),
+            'greenRed_10':  (get_percentage(.3), get_percentage(.8), 0                 ),
+            'greenRed_20':  (get_percentage(.4), get_percentage(.7), 0                 ),
+            'greenRed_30':  (get_percentage(.5), get_percentage(.6), 0                 ),
+            'greenRed_40':  (get_percentage(.6), get_percentage(.5), 0                 ),
+            'greenRed_50':  (get_percentage(.7), get_percentage(.4), 0                 ),
+            'greenRed_60':  (get_percentage(.8), get_percentage(.3), 0                 ),
+            'greenRed_70':  (get_percentage(.9), get_percentage(.3), 0                 ),
+            'greenRed_80':  (get_percentage(.9), get_percentage(.2), 0                 ),
+            'greenRed_90':  (get_percentage(.9), get_percentage(.1), 0                 ),
+            'greenRed_100': (get_percentage(1),  0,                  0                 ),
         }
-        return colors[color]
-    
-    def get_color(value, brightness=brightness):
-        if value is None:
-            return get_color_tuple('off')
-        
-        if blueRedGradient:
-            if value < 30:
-                return get_color_tuple('30', brightness=brightness)
-            elif value >= 30 and value < 40:
-                return get_color_tuple('30', brightness=brightness)
-            elif value >= 40 and value < 50:
-                return get_color_tuple('40', brightness=brightness)
-            elif value >= 50 and value < 60:
-                return get_color_tuple('50', brightness=brightness)
-            elif value >= 60 and value < 70:
-                return get_color_tuple('60', brightness=brightness)
-            elif value >= 70 and value < 80:
-                return get_color_tuple('70', brightness=brightness)
-            elif value >= 80 and value < 90:
-                return get_color_tuple('80', brightness=brightness)
-            elif value >= 90:
-                return get_color_tuple('90', brightness=brightness)
-            else:
-                return get_color_tuple('off')
-        
-        if value < CONFIG['LED']['YELLOW_THRESHOLD_START']:
-            return get_color_tuple('green', brightness=brightness)
-        elif value >= CONFIG['LED']['YELLOW_THRESHOLD_START'] and value < CONFIG['LED']['RED_THRESHOLD_START']:
-            return get_color_tuple('yellow', brightness=brightness)
-        elif value >= CONFIG['LED']['RED_THRESHOLD_START']:
-            return get_color_tuple('red', brightness=brightness)
-        else:
-            return get_color_tuple('off')
+        if blueRed:
+            rgb = round(color / 10.0) * 10
+            index = 'blueRed_' + str(rgb)
+            return colors[index] if index in colors else colors['off']
+        if greenRed:
+            rgb = round(color / 10.0) * 10
+            index = 'greenRed_' + str(rgb)
+            return colors[index] if index in colors else colors['off']
+        return colors[color] if color in colors else colors['off']
 
     def set_all_strips(RGBValue):
         for strip in NP.keys():
@@ -411,27 +414,27 @@ def set_LEDs(strip=None, pinMap={}, color='', brightness=50, RGBValue=(0,0,0), s
             if hour == HOUR:
                 log(f'    >> current hour: {hour}, setting brightness to 100%')
                 color = get_color(value, brightness=100)
-            elif hour == HOUR - 1:
-                log(f'    >> Previous hour {hour}, setting brightness to 33%')
-                color = get_color(value, brightness=round(brightness/3))
+            elif hour < HOUR:
+                log(f'    >> Hour {hour} is lower than current: {HOUR}, setting brightness to 25%')
+                color = get_color(value, brightness=round(brightness/4))
             else:
                 color = get_color(value)
             pinNumber = HOURS_MAP.index(hour)
             log(f'  Setting pin {pinNumber} to color {color} for value {value}')
             strip[pinNumber] = color
     elif startPin is not None:
-        log(f'  Setting LED pin {startPin} to: color {get_color_tuple(color)}')
+        log(f'  Setting LED pin {startPin} to: color {get_color(color)}')
         if startPin >= CONFIG['LED']['TOTAL_COUNT']:
             # reset all LEDs
-            set_LEDs(color='off', startPin=None)
+            set_LEDs(color='off')
             return 0
-        strip[startPin] = get_color_tuple(color)
+        strip[startPin] = get_color(color)
         strip.write()
         startPin += 1
         return startPin
     else:
-        log(f'  Setting all LEDs to {get_color_tuple(color)}')
-        set_all_strips(get_color_tuple(color))
+        log(f'  Setting all LEDs to {get_color(color)}')
+        set_all_strips(get_color(color))
         return
     strip.write()
 
@@ -441,17 +444,6 @@ def create_pin_dict():
     for hour in range(CONFIG['LED']['FIRST_BAR_HOUR'], CONFIG['LED']['FIRST_BAR_HOUR']+CONFIG['LED']['TOTAL_COUNT']):
         pin_data[hour] = None
     return pin_data
-
-def get_seconds_to_next_hour():
-    minute_now = time.localtime()[4]
-    second_now = time.localtime()[5]
-    current = (minute_now * 60) + second_now
-    return 3600 - current
-
-def sleep_until_next_hour():
-    delayTime = get_seconds_to_next_hour()
-    log(f'Will run again in {round(delayTime/60)} minutes, {delayTime%60} seconds')
-    time.sleep(delayTime)
 
 def generate_hours_map():
     global HOURS_MAP
@@ -477,30 +469,18 @@ def map_hours_to_pins():
             pinData[hour] = None
     return pinData
 
-def overnight_sleep():
-    seconds_to_on_time = (24 - CONFIG['LED']['OFF_HOUR'] + CONFIG['LED']['ON_HOUR']) * 60 * 60
-    clock_drift_adjustment = round(seconds_to_on_time * .95)
-    log(f'Will run again in {round(clock_drift_adjustment/60)} minutes, {clock_drift_adjustment%60} seconds')
-    set_LEDs(color='off')
-    manage_wifi(action='disconnect', useLEDs=False)
-    time.sleep(clock_drift_adjustment)
-    manage_wifi(action='connect', useLEDs=False)
-    validate_internet_connection()
-    update_RTC()
-    sleep_until_next_hour()
-
 def send_map_to_leds(pinData):
     rainData = {}
     for hour in pinData.keys():
         value = pinData[hour]
         rainData[hour] = value['rain']
-    set_LEDs(strip=NP['RAIN'], pinMap=rainData, brightness=CONFIG['LED']['BRIGHTNESS'])
+    set_LEDs(strip=NP['RAIN'], pinMap=rainData, brightness=CONFIG['LED']['BRIGHTNESS'], greenRed=True)
     if CONFIG['LED']['TEMP_STRIP']:
         tempData = {}
         for hour in pinData.keys():
             value = pinData[hour]
             tempData[hour] = value['temp']
-        set_LEDs(strip=NP['TEMP'], pinMap=tempData, brightness=CONFIG['LED']['BRIGHTNESS'], blueRedGradient=True)
+        set_LEDs(strip=NP['TEMP'], pinMap=tempData, brightness=CONFIG['LED']['BRIGHTNESS'], blueRed=True)
 
 def write_error_log(message):
     log('Writing error log')
@@ -539,7 +519,7 @@ def main_loop():
         update_RTC()
         get_local_worldtimeapi_time()
         if HOUR == CONFIG['LED']['OFF_HOUR']:
-            overnight_sleep()
+            Delay().overnight_sleep()
         Check_for_updates().main()
         hourMap = map_hours_to_pins()
         send_map_to_leds(hourMap)
@@ -550,15 +530,12 @@ def main_loop():
         log(f'Error occurred: {e}', write_to_file=True)
 
 def main():
-    global WLAN
     print('Starting up....')
-    get_local_config()
     init_neopixel()
-    WLAN = network.WLAN(network.STA_IF)
     set_LEDs(color='cyan', brightness=10)
     generate_hours_map()
     while True:
         main_loop()
-        sleep_until_next_hour()
+        Delay().sleep_until_next_hour()
 
 main()

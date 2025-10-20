@@ -196,6 +196,7 @@ class Delay():
     def sleep_until_next_hour(self):
         delayTime = self.get_seconds_to_next_hour()
         log(f'Will run again in {round(delayTime/60)} minutes, {delayTime%60} seconds')
+        #machine.deepsleep(delayTime * 1000)
         time.sleep(delayTime)
     def overnight_sleep(self):
         seconds_to_on_time = (24 - CONFIG['LED']['OFF_HOUR'] + CONFIG['LED']['ON_HOUR']) * 60 * 60
@@ -219,7 +220,7 @@ def init_neopixel():
         temp_pin = machine.Pin(CONFIG['LED']['TEMP_GPIO_PIN'], machine.Pin.OUT)
         NP['TEMP'] = NeoPixel(temp_pin, CONFIG['LED']['TOTAL_COUNT'])
 
-def write_user_config(config):
+def write_user_config(config=CONFIG):
     with open(CONFIG_FILE, 'w') as f:
         f.write(json.dumps(config))
 
@@ -239,14 +240,6 @@ def make_network_request_with_retry(url, message):
             log(f'  >> status code: {response.status_code}')
         if retries == CONFIG['NETWORK']['MAX_REQUEST_RETRIES']:
             return None
-
-def get_local_timeapi_time():
-    log('Getting local time from timeapi')
-    url = 'https://timeapi.io/api/time/current/coordinate'
-    url = url + '?latitude=' + CONFIG['LOCATION']['LATITUDE']
-    url = url + '&longitude=' + CONFIG['LOCATION']['LONGITUDE']
-    timeResponse = make_network_request_with_retry(url, 'Failed to get time')
-    return timeResponse
 
 def get_local_worldtimeapi_time():
     log('Getting local time from worldtimeapi')
@@ -351,7 +344,6 @@ def update_RTC():
             log(f'  Pausing {CONFIG['NETWORK']['REQUEST_RETRY_DELAY_SECONDS']} seconds before next attempt')
         if retries == CONFIG['NETWORK']['MAX_REQUEST_RETRIES']:
             return None
-    #RTC.datetime(get_current_time_in_RTC())
 
 def set_LEDs(strip=None, pinMap={}, color='', brightness=50, RGBValue=(0,0,0), startPin=None, blueRed=False, greenRed=False):
     if brightness > 100:
@@ -389,16 +381,15 @@ def set_LEDs(strip=None, pinMap={}, color='', brightness=50, RGBValue=(0,0,0), s
             'greenRed_90':  (get_percentage(.9), get_percentage(.1), 0                 ),
             'greenRed_100': (get_percentage(1),  0,                  0                 ),
         }
-        if blueRed:
+        if blueRed or greenRed:
             rgb = round(color / 10.0) * 10
-            index = 'blueRed_' + str(rgb)
+            if blueRed:
+                index = 'blueRed_' + str(rgb)
+            elif greenRed:
+                index = 'greenRed_' + str(rgb)
             rgbvalue = colors[index] if index in colors else colors['off']
             log(f"      >> indexed to {index} : {str(rgbvalue)}")
             return rgbvalue
-        if greenRed:
-            rgb = round(color / 10.0) * 10
-            index = 'greenRed_' + str(rgb)
-            return colors[index] if index in colors else colors['off']
         return colors[color] if color in colors else colors['off']
 
     def set_all_strips(RGBValue):
@@ -467,8 +458,8 @@ def map_hours_to_pins():
             log(f'  Mapping hour {hour} to {hoursMap[hour]}')
             pinData[hour] = hoursMap[hour]
         else:
-            log(f'  Mapping hour {hour} to None')
-            pinData[hour] = None
+            log(f'  Mapping hour {hour} to off')
+            pinData[hour] = {'rain': 'off', 'temp': 'off'}
     return pinData
 
 def send_map_to_leds(pinData):

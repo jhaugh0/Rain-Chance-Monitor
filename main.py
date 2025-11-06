@@ -157,7 +157,7 @@ class WeatherGOV():
         self.base = 'https://api.weather.gov'
         self.latitude = str(round(float(CONFIG['LOCATION']['LATITUDE']), 4))
         self.longitude = str(round(float(CONFIG['LOCATION']['LONGITUDE']), 4))
-        self.headers = {'user-agent':'jordan@haugh.one'}
+        self.headers = {'user-agent':'unpadded_viselike357@simplelogin.com'}
     def get_point(self):
         log('  >> Getting point data/endpoint by geo coords')
         url = self.base + '/points/' + self.latitude + ',' + self.longitude
@@ -201,14 +201,15 @@ class Delay():
     def overnight_sleep(self):
         seconds_to_on_time = (24 - CONFIG['LED']['OFF_HOUR'] + CONFIG['LED']['ON_HOUR']) * 60 * 60
         clock_drift_adjustment = round(seconds_to_on_time * .95)
-        log(f'Will run again in {round(clock_drift_adjustment/60)} minutes, {clock_drift_adjustment%60} seconds')
+        log(f'Will run again in {clock_drift_adjustment/60/60} hours')
         set_LEDs(color='off')
-        manage_wifi(action='disconnect', useLEDs=False)
+        manage_wifi(action='disconnect')
         time.sleep(clock_drift_adjustment)
         manage_wifi(action='connect', useLEDs=False)
         validate_internet_connection()
         update_RTC()
         self.sleep_until_next_hour()
+        get_local_worldtimeapi_time()
 
 def init_neopixel():
     log('Initializing NeoPixel Variables')
@@ -388,7 +389,7 @@ def set_LEDs(strip=None, pinMap={}, color='', brightness=50, RGBValue=(0,0,0), s
             elif greenRed:
                 index = 'greenRed_' + str(rgb)
             rgbvalue = colors[index] if index in colors else colors['off']
-            log(f"      >> indexed to {index} : {str(rgbvalue)}")
+            log(f"    >> indexed to {index} : {str(rgbvalue)}")
             return rgbvalue
         return colors[color] if color in colors else colors['off']
 
@@ -446,6 +447,7 @@ def generate_hours_map():
         HOURS_MAP = list(range(CONFIG['LED']['FIRST_BAR_HOUR'], CONFIG['LED']['FIRST_BAR_HOUR']+CONFIG['LED']['TOTAL_COUNT']))
 
 def map_hours_to_pins():
+    log('Mapping hours to pins')
     pinData = create_pin_dict()
     if CONFIG['PROVIDER'] == 'weatherapi':
         hoursMap = WeatherAPI().main()
@@ -453,12 +455,13 @@ def map_hours_to_pins():
         hoursMap = Accuweather().main()
     elif CONFIG['PROVIDER'] == 'weathergov':
         hoursMap = WeatherGOV().main()
+    log('  Mapping hour data to pin data')
     for hour in pinData:
         if hour in hoursMap.keys():
-            log(f'  Mapping hour {hour} to {hoursMap[hour]}')
+            log(f'    >> Mapping hour {hour} to {hoursMap[hour]}')
             pinData[hour] = hoursMap[hour]
         else:
-            log(f'  Mapping hour {hour} to off')
+            log(f'    >> Mapping hour {hour} to off')
             pinData[hour] = {'rain': 'off', 'temp': 'off'}
     return pinData
 

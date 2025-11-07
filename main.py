@@ -206,7 +206,7 @@ class Delay():
         manage_wifi(action='disconnect')
         time.sleep(clock_drift_adjustment)
         manage_wifi(action='connect', useLEDs=False)
-        validate_internet_connection()
+        validate_internet_connection(useLEDs=False)
         update_RTC()
         self.sleep_until_next_hour()
         get_local_worldtimeapi_time()
@@ -303,7 +303,7 @@ def manage_wifi(action='connect', useLEDs=True):
         log('Disabling WiFi')
         WLAN.active(False)
 
-def validate_internet_connection(tries_before_reconnect=10, max_tries=20):
+def validate_internet_connection(tries_before_reconnect=10, max_tries=20, useLEDs=True):
     log('Validating public internet connection')
     retries = 0
     while True:
@@ -311,7 +311,8 @@ def validate_internet_connection(tries_before_reconnect=10, max_tries=20):
             response = r.get('https://ip.me')
             if response.status_code == 200:
                 log(f'  Internet appears to be connected, Public IP: {response.text.strip()}')
-                set_LEDs(color='blue', brightness=1)
+                if useLEDs:
+                    set_LEDs(color='blue', brightness=1)
                 return True
         except Exception as e:
             if retries == max_tries:

@@ -515,12 +515,13 @@ def main_loop():
         validate_internet_connection()
         update_RTC()
         get_local_worldtimeapi_time()
-        if HOUR == CONFIG['LED']['OFF_HOUR']:
-            Delay().overnight_sleep()
         Check_for_updates().main()
         hourMap = map_hours_to_pins()
         send_map_to_leds(hourMap)
         manage_wifi(action='disconnect')
+        if HOUR == CONFIG['LED']['ON_HOUR'] - 1:
+            time.sleep(60 * 60)
+            Delay().overnight_sleep()
         return
     except Exception as e:
         write_error_log(str(e))

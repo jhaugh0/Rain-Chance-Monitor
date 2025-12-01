@@ -69,8 +69,8 @@ class Check_for_updates():
         with open('main.py', 'w') as f:
             f.write(file)
     def main(self):
-        if HOUR != CONFIG['LED']['ON_HOUR']:
-            log('  >> Not the ON_HOUR, skipping update check')
+        if HOUR != CONFIG['LED']['ON_HOUR'] and HOUR != CONFIG['LED']['OFF_HOUR']:
+            log('  >> Not the ON_HOUR or OFF_HOUR, skipping update check')
             return
         current_version = self.get_version_from_disk()
         latest_version = self.get_version_from_github()
@@ -386,6 +386,10 @@ def set_LEDs(strip=None, pinMap={}, color='', brightness=50, RGBValue=(0,0,0), s
         if blueRed or greenRed:
             rgb = round(color / 10.0) * 10
             if blueRed:
+                if rgb < 30:
+                    rgb = 30
+                if rgb > 90:
+                    rgb = 90
                 index = 'blueRed_' + str(rgb)
             elif greenRed:
                 index = 'greenRed_' + str(rgb)
@@ -519,7 +523,7 @@ def main_loop():
         hourMap = map_hours_to_pins()
         send_map_to_leds(hourMap)
         manage_wifi(action='disconnect')
-        if HOUR == CONFIG['LED']['ON_HOUR'] - 1:
+        if HOUR == CONFIG['LED']['OFF_HOUR'] - 1:
             time.sleep(60 * 60)
             Delay().overnight_sleep()
         return

@@ -203,7 +203,6 @@ class Delay():
         clock_drift_adjustment = round(seconds_to_on_time * .95)
         log(f'Will run again in {clock_drift_adjustment/60/60} hours')
         set_LEDs(color='off')
-        manage_wifi(action='disconnect')
         time.sleep(clock_drift_adjustment)
         manage_wifi(action='connect', useLEDs=False)
         validate_internet_connection(useLEDs=False)
@@ -299,9 +298,12 @@ def manage_wifi(action='connect', useLEDs=True):
             return
     elif action == 'disconnect':
         log('Disconnecting WiFi')
-        WLAN.disconnect()
-        log('Disabling WiFi')
-        WLAN.active(False)
+        if WLAN.active():
+            WLAN.disconnect()
+            log('Disabling WiFi')
+            WLAN.active(False)
+        else:
+            log('WiFi is already disabled')
 
 def validate_internet_connection(tries_before_reconnect=10, max_tries=20, useLEDs=True):
     log('Validating public internet connection')
@@ -524,6 +526,7 @@ def main_loop():
         send_map_to_leds(hourMap)
         manage_wifi(action='disconnect')
         if HOUR == CONFIG['LED']['OFF_HOUR'] - 1:
+            log(f'Hour is one before off time: {CONFIG['LED']['OFF_HOUR']}, sleeping an hour before turning off for the night')
             time.sleep(60 * 60)
             Delay().overnight_sleep()
         return

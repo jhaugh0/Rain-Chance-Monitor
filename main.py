@@ -71,6 +71,7 @@ class Check_for_updates():
     def main(self):
         if HOUR != CONFIG['LED']['ON_HOUR'] and HOUR != CONFIG['LED']['OFF_HOUR']:
             log('  >> Not the ON_HOUR or OFF_HOUR, skipping update check')
+            set_LEDs(strip=NP['RAIN'], color='yellow', brightness=1)
             return
         current_version = self.get_version_from_disk()
         latest_version = self.get_version_from_github()
@@ -241,6 +242,19 @@ def make_network_request_with_retry(url, message):
         if retries == CONFIG['NETWORK']['MAX_REQUEST_RETRIES']:
             return None
 
+def get_local_timenow_time():
+    log('Getting local time from time.now')
+    url = 'https://time.now/developer/api/timezone/'
+    url = url + CONFIG['LOCATION']['TIME_REGION']
+    response = make_network_request_with_retry(url, message='Failed to get time')
+    if response:
+        global HOUR, DAY
+        log(f'  >> Local time {response['datetime']} returned')
+        HOUR = int(response['datetime'].split('T')[1].split(":")[0])
+        DAY = int(response['datetime'].split('T')[0].split("-")[2])
+        log(f'  >> Parsed time: {HOUR}:{DAY}')
+        set_LEDs(strip=NP['TEMP'], color='yellow', brightness=1)
+
 def get_local_worldtimeapi_time():
     log('Getting local time from worldtimeapi')
     url = 'http://worldtimeapi.org/api/timezone/'
@@ -274,6 +288,7 @@ def manage_wifi(action='connect', useLEDs=True):
             if useLEDs:
                 set_LEDs(color='off')
             WLAN.active(True)
+            WLAN.config(pm=WLAN.PM_NONE)
             time.sleep(.5)
             WLAN.scan()
             WLAN.connect(CONFIG['NETWORK']['SSID'], CONFIG['NETWORK']['PSK'])
@@ -314,7 +329,7 @@ def validate_internet_connection(tries_before_reconnect=10, max_tries=20, useLED
             if response.status_code == 200:
                 log(f'  Internet appears to be connected, Public IP: {response.text.strip()}')
                 if useLEDs:
-                    set_LEDs(color='blue', brightness=1)
+                    set_LEDs(strip=NP['TEMP'], color='blue', brightness=1)
                 return True
         except Exception as e:
             if retries == max_tries:
@@ -341,6 +356,7 @@ def update_RTC():
         try:
             ntptime.settime()
             log("  Local time after synchronization：%s" %str(time.localtime()))
+            set_LEDs(strip=NP['RAIN'], color='blue', brightness=1)
             return
         except:
             log(f'  Failed to get NTP time, retry {retries+1}/{CONFIG['NETWORK']['MAX_REQUEST_RETRIES']}')
@@ -353,7 +369,6 @@ def set_LEDs(strip=None, pinMap={}, color='', brightness=50, RGBValue=(0,0,0), s
     if brightness > 100:
         brightness = 100   
     log(f'Setting LEDs. Brightness: {brightness}')
-
     def get_color(color, brightness=brightness):
         brightness = round(255 * (brightness * .01))
         def get_percentage(value):
@@ -399,13 +414,11 @@ def set_LEDs(strip=None, pinMap={}, color='', brightness=50, RGBValue=(0,0,0), s
             log(f"    >> indexed to {index} : {str(rgbvalue)}")
             return rgbvalue
         return colors[color] if color in colors else colors['off']
-
     def set_all_strips(RGBValue):
         for strip in NP.keys():
             log(f'  Setting strip {strip} to value: {RGBValue}')
             NP[strip].fill(RGBValue)
             NP[strip].write()
-
     if RGBValue != (0,0,0):
         set_all_strips(RGBValue)
         return
@@ -429,10 +442,14 @@ def set_LEDs(strip=None, pinMap={}, color='', brightness=50, RGBValue=(0,0,0), s
             # reset all LEDs
             set_LEDs(color='off')
             return 0
-        strip[startPin] = get_color(color)
-        strip.write()
+        for strip in list(NP):
+            NP[strip][startPin] = get_color(color)
+            NP[strip].write()
         startPin += 1
         return startPin
+    elif strip != None and color != '':
+        log(f'  Setting strip {strip} to color {get_color(color)}')
+        strip.fill(get_color(color))
     else:
         log(f'  Setting all LEDs to {get_color(color)}')
         set_all_strips(get_color(color))
@@ -470,6 +487,7 @@ def map_hours_to_pins():
         else:
             log(f'    >> Mapping hour {hour} to off')
             pinData[hour] = {'rain': 'off', 'temp': 'off'}
+    set_LEDs(strip=NP['TEMP'], color='cyan', brightness=1)
     return pinData
 
 def send_map_to_leds(pinData):
@@ -520,7 +538,7 @@ def main_loop():
         manage_wifi('connect')
         validate_internet_connection()
         update_RTC()
-        get_local_worldtimeapi_time()
+        get_local_timenow_time()
         Check_for_updates().main()
         hourMap = map_hours_to_pins()
         send_map_to_leds(hourMap)

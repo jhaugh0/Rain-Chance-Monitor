@@ -207,7 +207,7 @@ class Delay():
         time.sleep(clock_drift_adjustment)
         manage_wifi(action='connect', useLEDs=False)
         validate_internet_connection(useLEDs=False)
-        update_RTC()
+        update_RTC(useLEDs=False)
         self.sleep_until_next_hour()
         get_local_worldtimeapi_time()
 
@@ -356,7 +356,8 @@ def update_RTC(useLEDs=True):
         try:
             ntptime.settime()
             log("  Local time after synchronization：%s" %str(time.localtime()))
-            set_LEDs(strip=NP['RAIN'], color='blue', brightness=1)
+            if useLEDs:
+                set_LEDs(strip=NP['RAIN'], color='blue', brightness=1)
             return
         except:
             log(f'  Failed to get NTP time, retry {retries+1}/{CONFIG['NETWORK']['MAX_REQUEST_RETRIES']}')

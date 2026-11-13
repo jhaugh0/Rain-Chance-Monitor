@@ -11,9 +11,6 @@
         "LONGITUDE" : "",
         "TIME_REGION" : "America/New_York"
     },
-    "ACCUWEATHER_API_KEY" : "",
-    "WEATHERAPI_API_KEY" : "",
-    "PROVIDER" : "weathergov",
     "LED" : {
         "CABLE_SIDE" : "right",
         "TEMP_STRIP": true,

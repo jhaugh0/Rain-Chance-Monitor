@@ -14,14 +14,71 @@ RUN_LOG = 'run.log'
 ERROR_LOG = 'error.log'
 Run_Log = ''
 
-print('Getting config from local file')
-with open(CONFIG_FILE, 'r') as f:
-    CONFIG = json.load(f)
-print('  >> Loaded!')
-
 RTC = machine.RTC()
 WLAN = network.WLAN(network.STA_IF)
-ACCUWEATHER_LOCATION_KEY = ''
+
+BASE_CONFIG = {
+    "TIME_BETWEEN_CHECKS_M" : 15,
+    "NETWORK" : {
+        "SSID" : "WOL",
+        "PSK" : "",
+        "MAX_REQUEST_RETRIES" : 5,
+        "REQUEST_RETRY_DELAY_SECONDS" : 5,
+        "INTERNET_CHECK_RETRY_SECONDS" : 5
+    },
+    "LOCATION": {
+        "LATITUDE" : "",
+        "LONGITUDE" : "",
+        "TIME_REGION" : "America/New_York"
+    },
+    "LED" : {
+        "CABLE_SIDE" : "right",
+        "TEMP_STRIP": True,
+        "RAIN_GPIO_PIN" : 35,
+        "TEMP_GPIO_PIN" : 37,
+        "ON_HOUR" : 7,
+        "OFF_HOUR" : 22,
+        "FIRST_BAR_HOUR" : 8,
+        "TOTAL_COUNT" : 15,
+        "BRIGHTNESS" : 10,
+        "YELLOW_THRESHOLD_START" : 30,
+        "RED_THRESHOLD_START" : 50
+    }
+}
+
+OFF = (0, 0, 0)
+NAMED = {
+    'red':    (1, 0, 0),
+    'green':  (0, 1, 0),
+    'blue':   (0, 0, 1),
+    'yellow': (1, 1, 0),
+    'cyan':   (0, 1, 1),
+    'white':  (1, 1, 1),
+    'off':    OFF,
+}
+BLUE_RED = {
+    30: (0,  0,  1),
+    40: (.1, .2, .9),
+    50: (.2, .3, .5),
+    60: (.3, .5, .3),
+    70: (.5, .3, .2),
+    80: (.9, .2, .1),
+    90: (1,  0,  0),
+}
+GREEN_RED = {
+    0:   (0,  1,  0),
+    10:  (.3, .8, 0),
+    20:  (.4, .7, 0),
+    30:  (.5, .6, 0),
+    40:  (.6, .5, 0),
+    50:  (.7, .4, 0),
+    60:  (.8, .3, 0),
+    70:  (.9, .3, 0),
+    80:  (.9, .2, 0),
+    90:  (.9, .1, 0),
+    100: (1,  0,  0),
+}
+
 
 class Check_for_updates():
     def __init__(self):
@@ -90,68 +147,6 @@ class Check_for_updates():
         else:
             log(f'No new version found\n  Current version: {current_version}\n  Latest version:  {latest_version}')
 
-class WeatherAPI():
-    def __init__(self):
-        self.api_key = CONFIG['WEATHERAPI_API_KEY']
-    def get_forecast(self):
-        log('Getting Weather Data from weatherapi')
-        url = "http://api.weatherapi.com/v1/forecast.json"
-        url = url + "?key=" + self.api_key + "&q=" + CONFIG['LOCATION']['LATITUDE'] + "," + CONFIG['LOCATION']['LONGITUDE']
-        url = url + "&days=1" + "&aqi=no" + "&alerts=no" + "&hour_fields=chance_of_rain,will_it_rain,feelslike_f"
-        request = r.get(url)
-        localtime = request.json()['location']['localtime']
-        forecast = request.json()['forecast']['forecastday'][0]['hour']
-        return forecast
-    def map_hours_data(self, forecast):
-        log('Mapping weatherapi hour data')
-        hours = {}
-        for hourData in forecast:
-            hour = int(hourData['time'].split(' ')[1].split(':')[0])
-            hours[hour] = {}
-            hours[hour]['rain'] = hourData['chance_of_rain']
-            hours[hour]['temp'] = hourData['temp_f']
-        log(f'Returned data: {hours}')
-        return hours
-    def main(self):
-        forecast = self.get_forecast()
-        hourMap = self.map_hours_data(forecast)
-        return hourMap
-
-class Accuweather():
-    def __init__(self):
-        self.api_key = CONFIG['ACCUWEATHER_API_KEY']
-    def get_location_key(self):
-        global ACCUWEATHER_LOCATION_KEY
-        if ACCUWEATHER_LOCATION_KEY != '':
-            return
-        log('Getting Accuweather location key')
-        url = 'http://dataservice.accuweather.com/locations/v1/cities/geoposition/search?'
-        url = url + '&apikey=' + self.api_key
-        url = url + '&q=' + CONFIG['LOCATION']['LATITUDE'] + '%2C' + CONFIG['LOCATION']['LONGITUDE']
-        response = make_network_request_with_retry(url, 'Failed to get weather key')
-        key = str(response['Key'])
-        ACCUWEATHER_LOCATION_KEY = key
-    def get_data(self):
-        log('Getting Weather Data')
-        url = 'http://dataservice.accuweather.com/forecasts/v1/hourly/12hour/' + ACCUWEATHER_LOCATION_KEY + '?'
-        url = url + '&apikey=' + CONFIG['ACCUWEATHER_API_KEY']
-        response = make_network_request_with_retry(url, 'Failed to get weather data')
-        return response
-    def extract_precip_chance(self, rJson):
-        log('Extracting precip chance from response')
-        hours = {}
-        for hourData in rJson:
-            hour = int(hourData['DateTime'].split('T')[1].split(':')[0])
-            hours[hour] = {}
-            hours[hour]['rain'] = hourData['PrecipitationProbability']
-        log(f'Returned data: {hours}')
-        return hours
-    def main(self):
-        self.get_location_key()
-        weatherJSON = self.get_data()
-        hourMap = self.extract_precip_chance(weatherJSON)
-        return hourMap
-
 class WeatherGOV():
     def __init__(self):
         log('Getting Weather Data from weather.gov')
@@ -188,28 +183,39 @@ class WeatherGOV():
         filtered = self.filter_forecast(forecast)
         return filtered   
 
-class Delay():
-    def get_seconds_to_next_hour(self):
-        minute_now = time.localtime()[4]
-        second_now = time.localtime()[5]
-        current = (minute_now * 60) + second_now
-        return 3600 - current
-    def sleep_until_next_hour(self):
-        delayTime = self.get_seconds_to_next_hour()
-        log(f'Will run again in {round(delayTime/60)} minutes, {delayTime%60} seconds')
-        #machine.deepsleep(delayTime * 1000)
-        time.sleep(delayTime)
-    def overnight_sleep(self):
-        seconds_to_on_time = (24 - CONFIG['LED']['OFF_HOUR'] + CONFIG['LED']['ON_HOUR'] - 1) * 60 * 60
-        clock_drift_adjustment = round(seconds_to_on_time * .95)
-        log(f'Will run again in {clock_drift_adjustment/60/60} hours')
-        set_LEDs(color='off')
-        time.sleep(clock_drift_adjustment)
-        manage_wifi(action='connect', useLEDs=False)
-        validate_internet_connection(useLEDs=False)
-        update_RTC(useLEDs=False)
-        self.sleep_until_next_hour()
-        get_local_worldtimeapi_time()
+def delay():
+    minute_now = time.localtime()[4]
+    second_now = time.localtime()[5]
+    current = (minute_now * 60) + second_now
+    seconds_to_hour = (60 * 60) - current
+    if seconds_to_hour <= CONFIG['TIME_BETWEEN_CHECKS_M']:
+        delay = seconds_to_hour
+    else:
+        delay = CONFIG['TIME_BETWEEN_CHECKS_M'] * 60
+    log(f'  Delaying for {delay} seconds, resume time: {time.localtime(time.time() + delay)}')
+    time.sleep(delay)
+
+def load_config():
+    global CONFIG
+    log('Loading configuration')
+    try:
+        with open(CONFIG_FILE, 'r') as f:
+            log(f'  Reading configuration from {CONFIG_FILE}')
+            config = json.loads(f.read())
+            log(f'  >> Configuration loaded: {config}')
+    except:
+        log('Failed to load configuration, writing default test config')
+        write_test_config()
+        load_config()
+    update = False
+    for key, value in BASE_CONFIG.items():
+        if key not in config:
+            config[key] = value
+            update = True
+    if update:
+        with open(CONFIG_FILE, 'w') as f:
+            f.write(json.dumps(config))
+    CONFIG = config
 
 def init_neopixel():
     log('Initializing NeoPixel Variables')
@@ -220,10 +226,6 @@ def init_neopixel():
     if CONFIG['LED']['TEMP_STRIP']:
         temp_pin = machine.Pin(CONFIG['LED']['TEMP_GPIO_PIN'], machine.Pin.OUT)
         NP['TEMP'] = NeoPixel(temp_pin, CONFIG['LED']['TOTAL_COUNT'])
-
-def write_user_config(config=CONFIG):
-    with open(CONFIG_FILE, 'w') as f:
-        f.write(json.dumps(config))
 
 def make_network_request_with_retry(url, message):
     log(f'  Making GET request to {url}')
@@ -366,96 +368,61 @@ def update_RTC(useLEDs=True):
         if retries == CONFIG['NETWORK']['MAX_REQUEST_RETRIES']:
             return None
 
-def set_LEDs(strip=None, pinMap={}, color='', brightness=50, RGBValue=(0,0,0), startPin=None, blueRed=False, greenRed=False):
-    if brightness > 100:
-        brightness = 100   
-    log(f'Setting LEDs. Brightness: {brightness}')
-    def get_color(color, brightness=brightness):
-        brightness = round(255 * (brightness * .01))
-        def get_percentage(value):
-            return round(brightness * value)
-        colors = {
-            'red':          (brightness,          0,                 0                 ),
-            'green':        (0,                   brightness,        0                 ),
-            'blue':         (0,                   0,                 brightness        ),
-            'yellow':       (brightness,          brightness,        0                 ),
-            'cyan':         (0,                   brightness,        brightness        ),
-            'white':        (brightness,          brightness,        brightness        ),
-            'off':          (0,                   0,                 0                 ),
-            'blueRed_30':   (0,                   0,                 get_percentage(1) ),
-            'blueRed_40':   (get_percentage(.1), get_percentage(.2), get_percentage(.9)),
-            'blueRed_50':   (get_percentage(.2), get_percentage(.3), get_percentage(.5)),
-            'blueRed_60':   (get_percentage(.3), get_percentage(.5), get_percentage(.3)),
-            'blueRed_70':   (get_percentage(.5), get_percentage(.3), get_percentage(.2)),
-            'blueRed_80':   (get_percentage(.9), get_percentage(.2), get_percentage(.1)),
-            'blueRed_90':   (get_percentage(1),  0,                  0                 ),
-            'greenRed_0':   (0,                  get_percentage(1),  0                 ),
-            'greenRed_10':  (get_percentage(.3), get_percentage(.8), 0                 ),
-            'greenRed_20':  (get_percentage(.4), get_percentage(.7), 0                 ),
-            'greenRed_30':  (get_percentage(.5), get_percentage(.6), 0                 ),
-            'greenRed_40':  (get_percentage(.6), get_percentage(.5), 0                 ),
-            'greenRed_50':  (get_percentage(.7), get_percentage(.4), 0                 ),
-            'greenRed_60':  (get_percentage(.8), get_percentage(.3), 0                 ),
-            'greenRed_70':  (get_percentage(.9), get_percentage(.3), 0                 ),
-            'greenRed_80':  (get_percentage(.9), get_percentage(.2), 0                 ),
-            'greenRed_90':  (get_percentage(.9), get_percentage(.1), 0                 ),
-            'greenRed_100': (get_percentage(1),  0,                  0                 ),
-        }
-        if blueRed or greenRed:
-            rgb = round(color / 10.0) * 10
-            if blueRed:
-                if rgb < 30:
-                    rgb = 30
-                if rgb > 90:
-                    rgb = 90
-                index = 'blueRed_' + str(rgb)
-            elif greenRed:
-                index = 'greenRed_' + str(rgb)
-            rgbvalue = colors[index] if index in colors else colors['off']
-            log(f"    >> indexed to {index} : {str(rgbvalue)}")
-            return rgbvalue
-        return colors[color] if color in colors else colors['off']
-    def set_all_strips(RGBValue):
-        for strip in NP.keys():
-            log(f'  Setting strip {strip} to value: {RGBValue}')
-            NP[strip].fill(RGBValue)
-            NP[strip].write()
-    if RGBValue != (0,0,0):
-        set_all_strips(RGBValue)
-        return
-    elif pinMap != {}:
-        for hour in pinMap:
-            value = pinMap[hour]
+def get_color(color, brightness, blueRed=False, greenRed=False):
+    level = round(255 * brightness * .01)
+    if blueRed:
+        table, key = BLUE_RED, min(max(round(color / 10) * 10, 30), 90)
+    elif greenRed:
+        table, key = GREEN_RED, round(color / 10) * 10
+    else:
+        table, key = NAMED, color
+    return tuple(round(level * f) for f in table.get(key, OFF))
+
+def set_pixel(strip, i, rgb):
+    """Set one pixel; return True only if it actually changed."""
+    if strip[i] == rgb:
+        return False
+    strip[i] = rgb
+    return True
+
+def fill_strips(strips, rgb):
+    for s in strips:
+        if all(s[i] == rgb for i in range(len(s))):
+            continue
+        s.fill(rgb)
+        s.write()
+
+def set_LEDs(strip=None, pinMap=None, color='', brightness=50, RGBValue=(0, 0, 0), startPin=None, blueRed=False, greenRed=False):
+    brightness = min(brightness, 100)
+    def rgb_for(value, level=brightness):
+        return get_color(value, level, blueRed, greenRed)
+    if RGBValue != (0, 0, 0):
+        fill_strips(NP.values(), RGBValue)
+    elif pinMap:
+        changed = False
+        for hour, value in pinMap.items():
             if hour == HOUR:
-                log(f'    >> current hour: {hour}, setting brightness to 100%')
-                color = get_color(value, brightness=100)
+                level = 100
             elif hour < HOUR:
-                log(f'    >> Hour {hour} is lower than current: {HOUR}, setting brightness to 25%')
-                color = get_color(value, brightness=round(brightness/4))
+                level = round(brightness / 4)
             else:
-                color = get_color(value)
-            pinNumber = HOURS_MAP.index(hour)
-            log(f'  Setting pin {pinNumber} to color {color} for value {value}')
-            strip[pinNumber] = color
+                level = brightness
+            changed |= set_pixel(strip, HOURS_MAP.index(hour), rgb_for(value, level))
+        if changed:
+            strip.write()          # one write per pass, and only if something changed
     elif startPin is not None:
-        log(f'  Setting LED pin {startPin} to: color {get_color(color)}')
         if startPin >= CONFIG['LED']['TOTAL_COUNT']:
-            # reset all LEDs
             set_LEDs(color='off')
             return 0
-        for strip in list(NP):
-            NP[strip][startPin] = get_color(color)
-            NP[strip].write()
-        startPin += 1
-        return startPin
-    elif strip != None and color != '':
-        log(f'  Setting strip {strip} to color {get_color(color)}')
-        strip.fill(get_color(color))
+        rgb = rgb_for(color)       # computed once instead of three times
+        for s in NP.values():
+            if set_pixel(s, startPin, rgb):
+                s.write()
+        return startPin + 1
+    elif strip is not None and color != '':
+        fill_strips([strip], rgb_for(color))
     else:
-        log(f'  Setting all LEDs to {get_color(color)}')
-        set_all_strips(get_color(color))
-        return
-    strip.write()
+        fill_strips(NP.values(), rgb_for(color))
 
 def create_pin_dict():
     log('Initializing pin dictionary')
@@ -466,20 +433,16 @@ def create_pin_dict():
 
 def generate_hours_map():
     global HOURS_MAP
+    hoursRange = range(CONFIG['LED']['FIRST_BAR_HOUR'], CONFIG['LED']['FIRST_BAR_HOUR']+CONFIG['LED']['TOTAL_COUNT'])
     if CONFIG['LED']['CABLE_SIDE'] == 'right':
-        HOURS_MAP = list(reversed(range(CONFIG['LED']['FIRST_BAR_HOUR'], CONFIG['LED']['FIRST_BAR_HOUR']+CONFIG['LED']['TOTAL_COUNT'])))
+        HOURS_MAP = list(reversed(hoursRange))
     else:
-        HOURS_MAP = list(range(CONFIG['LED']['FIRST_BAR_HOUR'], CONFIG['LED']['FIRST_BAR_HOUR']+CONFIG['LED']['TOTAL_COUNT']))
+        HOURS_MAP = list(hoursRange)
 
 def map_hours_to_pins():
     log('Mapping hours to pins')
     pinData = create_pin_dict()
-    if CONFIG['PROVIDER'] == 'weatherapi':
-        hoursMap = WeatherAPI().main()
-    elif CONFIG['PROVIDER'] == 'accuweather':
-        hoursMap = Accuweather().main()
-    elif CONFIG['PROVIDER'] == 'weathergov':
-        hoursMap = WeatherGOV().main()
+    hoursMap = WeatherGOV().main()
     log('  Mapping hour data to pin data')
     for hour in pinData:
         if hour in hoursMap.keys():
@@ -490,6 +453,10 @@ def map_hours_to_pins():
             pinData[hour] = {'rain': 'off', 'temp': 'off'}
     set_LEDs(strip=NP['TEMP'], color='cyan', brightness=1)
     return pinData
+
+def is_off_hours():
+    current_hour = time.localtime()[3]
+    return current_hour >= CONFIG['LED']['OFF_HOUR'] or current_hour < CONFIG['LED']['ON_HOUR']
 
 def send_map_to_leds(pinData):
     rainData = {}
@@ -521,6 +488,10 @@ def print_run_log():
         with open(RUN_LOG, 'r') as f:
             print(f.read())
 
+def write_test_config():
+    with open(CONFIG_FILE, 'w') as f:
+        f.write(json.dumps(BASE_CONFIG))
+
 def log(message, initialize=False, write_to_file=False):
     global Run_Log
     print(message)
@@ -543,11 +514,10 @@ def main_loop():
         Check_for_updates().main()
         hourMap = map_hours_to_pins()
         send_map_to_leds(hourMap)
-        manage_wifi(action='disconnect')
-        if HOUR == CONFIG['LED']['OFF_HOUR'] - 1:
-            log(f'Hour is one before off time: {CONFIG['LED']['OFF_HOUR']}, sleeping an hour before turning off for the night')
-            time.sleep(60 * 60)
-            Delay().overnight_sleep()
+        if is_off_hours():
+            log('It is currently off hours, skipping LED update.')
+            set_LEDs(color='off')
+            return
         return
     except Exception as e:
         write_error_log(str(e))
@@ -555,11 +525,12 @@ def main_loop():
 
 def main():
     print('Starting up....')
+    load_config()
     init_neopixel()
     set_LEDs(color='cyan', brightness=10)
     generate_hours_map()
     while True:
         main_loop()
-        Delay().sleep_until_next_hour()
+        delay()
 
 main()

@@ -126,7 +126,7 @@ class Check_for_updates():
         with open('main.py', 'w') as f:
             f.write(file)
     def main(self):
-        if HOUR != CONFIG['LED']['ON_HOUR'] and HOUR != CONFIG['LED']['OFF_HOUR']:
+        if HOUR != CONFIG['LED']['ON_HOUR'] and HOUR != CONFIG['LED']['OFF_HOUR'] and MINUTE != 0:
             log('  >> Not the ON_HOUR or OFF_HOUR, skipping update check')
             set_LEDs(strip=NP['RAIN'], color='yellow', brightness=1)
             return
@@ -244,8 +244,10 @@ def make_network_request_with_retry(url, message):
         if retries == CONFIG['NETWORK']['MAX_REQUEST_RETRIES']:
             return None
 
-def get_local_timenow_time():
+def get_local_timenow_time(useLEDs=True):
     log('Getting local time from time.now')
+    if is_off_hours():
+        useLEDs = False
     url = 'https://time.now/developer/api/timezone/'
     url = url + CONFIG['LOCATION']['TIME_REGION']
     response = make_network_request_with_retry(url, message='Failed to get time')
@@ -255,18 +257,24 @@ def get_local_timenow_time():
         HOUR = int(response['datetime'].split('T')[1].split(":")[0])
         DAY = int(response['datetime'].split('T')[0].split("-")[2])
         log(f'  >> Parsed time: {HOUR}:{DAY}')
-        set_LEDs(strip=NP['TEMP'], color='yellow', brightness=1)
+        if useLEDs:
+            set_LEDs(strip=NP['TEMP'], color='yellow', brightness=1)
 
-def get_local_worldtimeapi_time():
-    log('Getting local time from worldtimeapi')
-    url = 'http://worldtimeapi.org/api/timezone/'
-    url = url + CONFIG['LOCATION']['TIME_REGION']
-    response = make_network_request_with_retry(url, message='Failed to get time')
-    if response:
-        global HOUR, DAY
-        log(f'  >> Local time {response['datetime']} returned')
-        HOUR = int(response['datetime'].split('T')[1].split(":")[0])
-        DAY = int(response['datetime'].split('T')[0].split("-")[2])
+def _nth_sunday(year, month, n):
+    wd = time.localtime(time.mktime((year, month, 1, 0, 0, 0, 0, 0)))[6]  # Mon=0
+    return 1 + (6 - wd) % 7 + 7 * (n - 1)
+
+def local_time_dst(std_offset=-5 * 3600):
+    global HOUR, DAY, MINUTE
+    utc = time.time()
+    y = time.localtime(utc)[0]
+    start = time.mktime((y, 3, _nth_sunday(y, 3, 2), 2, 0, 0, 0, 0)) - std_offset
+    end = time.mktime((y, 11, _nth_sunday(y, 11, 1), 2, 0, 0, 0, 0)) - (std_offset + 3600)
+    offset = std_offset + 3600 if start <= utc < end else std_offset
+    offset_time = time.localtime(utc + offset)
+    DAY = offset_time[2]
+    HOUR = offset_time[3]
+    MINUTE = offset_time[4]
 
 def get_current_time_in_RTC():
     now = time.localtime(time.time() - 14400)
@@ -283,6 +291,8 @@ def get_current_time_in_RTC():
     return modified
 
 def manage_wifi(action='connect', useLEDs=True):
+    if is_off_hours():
+        useLEDs = False
     if action == 'connect':
         log('Connecting WiFi')
         log(f'  Using wifi info:\n    SSID: {CONFIG['NETWORK']['SSID']}\n    PSK:  {CONFIG['NETWORK']['PSK']}')
@@ -325,6 +335,8 @@ def manage_wifi(action='connect', useLEDs=True):
 def validate_internet_connection(tries_before_reconnect=10, max_tries=20, useLEDs=True):
     log('Validating public internet connection')
     retries = 0
+    if is_off_hours():
+        useLEDs = False
     while True:
         try:
             response = r.get('https://ip.me')
@@ -353,6 +365,8 @@ def validate_internet_connection(tries_before_reconnect=10, max_tries=20, useLED
 def update_RTC(useLEDs=True):
     log('Updating RTC time')
     log("  Local time before synchronization：%s" %str(time.localtime()))
+    if is_off_hours():
+        useLEDs = False
     retries = 0
     while retries < CONFIG['NETWORK']['MAX_REQUEST_RETRIES']:
         try:
@@ -455,8 +469,7 @@ def map_hours_to_pins():
     return pinData
 
 def is_off_hours():
-    current_hour = time.localtime()[3]
-    return current_hour >= CONFIG['LED']['OFF_HOUR'] or current_hour < CONFIG['LED']['ON_HOUR']
+    return HOUR >= CONFIG['LED']['OFF_HOUR'] or HOUR < CONFIG['LED']['ON_HOUR']
 
 def send_map_to_leds(pinData):
     rainData = {}
@@ -504,20 +517,21 @@ def log(message, initialize=False, write_to_file=False):
             f.write(Run_Log)
         return
 
-def main_loop():
+def main_loop(initialized):
     log('Starting Main Loop', initialize=True)
+    useLEDs = False if initialized else True
     try:
         manage_wifi('connect')
-        validate_internet_connection()
-        update_RTC()
-        get_local_timenow_time()
-        Check_for_updates().main()
-        hourMap = map_hours_to_pins()
-        send_map_to_leds(hourMap)
+        validate_internet_connection(useLEDs)
+        update_RTC(useLEDs)
+        local_time_dst()
         if is_off_hours():
             log('It is currently off hours, skipping LED update.')
             set_LEDs(color='off')
             return
+        Check_for_updates().main()
+        hourMap = map_hours_to_pins()
+        send_map_to_leds(hourMap)
         return
     except Exception as e:
         write_error_log(str(e))
@@ -525,12 +539,14 @@ def main_loop():
 
 def main():
     print('Starting up....')
+    intialized = False
     load_config()
     init_neopixel()
     set_LEDs(color='cyan', brightness=10)
     generate_hours_map()
     while True:
-        main_loop()
+        main_loop(intialized)
         delay()
+        intialized = True
 
 main()

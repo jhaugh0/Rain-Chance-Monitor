@@ -13,6 +13,9 @@ VERSION_TRACKER_FILE = 'version.txt'
 RUN_LOG = 'run.log'
 ERROR_LOG = 'error.log'
 Run_Log = ''
+CLOCK = {}          # filled by generate_clock_map() when LED TYPE is 'clock'
+PIN_DATA = None     # last forecast pulled from weather.gov (reused between LED steps)
+LAST_REFRESH = 0    # time.time() of the last full network refresh
 
 RTC = machine.RTC()
 WLAN = network.WLAN(network.STA_IF)
@@ -20,7 +23,7 @@ WLAN = network.WLAN(network.STA_IF)
 BASE_CONFIG = {
     "TIME_BETWEEN_CHECKS_M" : 15,
     "NETWORK" : {
-        "SSID" : "WOL",
+        "SSID" : "",
         "PSK" : "",
         "MAX_REQUEST_RETRIES" : 5,
         "REQUEST_RETRY_DELAY_SECONDS" : 5,
@@ -42,7 +45,10 @@ BASE_CONFIG = {
         "TOTAL_COUNT" : 15,
         "BRIGHTNESS" : 10,
         "YELLOW_THRESHOLD_START" : 30,
-        "RED_THRESHOLD_START" : 50
+        "RED_THRESHOLD_START" : 50,
+        "TYPE" : "bar",              # "bar" (default) or "clock"
+        "CLOCK_FIRST_HOUR" : 12,     # clock only: hour shown by LED 0 of each ring
+        "CLOCK_DIRECTION" : "cw"     # clock only: "cw" or "ccw", direction LED numbers increase
     }
 }
 
@@ -184,14 +190,19 @@ class WeatherGOV():
         return filtered   
 
 def delay():
-    minute_now = time.localtime()[4]
-    second_now = time.localtime()[5]
-    current = (minute_now * 60) + second_now
-    seconds_to_hour = (60 * 60) - current
-    if seconds_to_hour <= CONFIG['TIME_BETWEEN_CHECKS_M']:
-        delay = seconds_to_hour
+    now = time.localtime()
+    seconds_into_hour = (now[4] * 60) + now[5]
+    if is_clock() and not is_off_hours():
+        # Wake exactly when the clock hand crosses into the next outer-ring LED,
+        # i.e. 3600 / LEDs_per_hour seconds apart (360s for 10 LEDs per hour).
+        per_hour = CLOCK['PER_HOUR']['RAIN']
+        next_led = (seconds_into_hour * per_hour // 3600) + 1
+        next_boundary = -(-next_led * 3600 // per_hour)      # ceil, handles uneven divisions
+        delay = max(1, next_boundary - seconds_into_hour)
     else:
-        delay = CONFIG['TIME_BETWEEN_CHECKS_M'] * 60
+        seconds_to_hour = 3600 - seconds_into_hour
+        check_seconds = CONFIG['TIME_BETWEEN_CHECKS_M'] * 60
+        delay = seconds_to_hour if seconds_to_hour <= check_seconds else check_seconds
     log(f'  Delaying for {delay} seconds, resume time: {time.localtime(time.time() + delay)}')
     time.sleep(delay)
 
@@ -217,15 +228,24 @@ def load_config():
             f.write(json.dumps(config))
     CONFIG = config
 
+def dump_current_config():
+    with open(CONFIG_FILE, 'w') as f:
+        f.write(json.dumps(CONFIG))
+
 def init_neopixel():
     log('Initializing NeoPixel Variables')
     global NP
     NP = {}
     rain_pin = machine.Pin(CONFIG['LED']['RAIN_GPIO_PIN'], machine.Pin.OUT)
-    NP['RAIN'] = NeoPixel(rain_pin, CONFIG['LED']['TOTAL_COUNT'])
-    if CONFIG['LED']['TEMP_STRIP']:
+    if is_clock():
         temp_pin = machine.Pin(CONFIG['LED']['TEMP_GPIO_PIN'], machine.Pin.OUT)
-        NP['TEMP'] = NeoPixel(temp_pin, CONFIG['LED']['TOTAL_COUNT'])
+        NP['RAIN'] = NeoPixel(rain_pin, CONFIG['LED']['OUTER_RING'])
+        NP['TEMP'] = NeoPixel(temp_pin, CONFIG['LED']['INNER_RING'])
+    else:
+        NP['RAIN'] = NeoPixel(rain_pin, CONFIG['LED']['TOTAL_COUNT'])
+        if CONFIG['LED']['TEMP_STRIP']:
+            temp_pin = machine.Pin(CONFIG['LED']['TEMP_GPIO_PIN'], machine.Pin.OUT)
+            NP['TEMP'] = NeoPixel(temp_pin, CONFIG['LED']['TOTAL_COUNT'])
 
 def make_network_request_with_retry(url, message):
     log(f'  Making GET request to {url}')
@@ -265,7 +285,7 @@ def _nth_sunday(year, month, n):
     return 1 + (6 - wd) % 7 + 7 * (n - 1)
 
 def local_time_dst(std_offset=-5 * 3600):
-    global HOUR, DAY, MINUTE
+    global HOUR, DAY, MINUTE, SECOND
     utc = time.time()
     y = time.localtime(utc)[0]
     start = time.mktime((y, 3, _nth_sunday(y, 3, 2), 2, 0, 0, 0, 0)) - std_offset
@@ -275,20 +295,7 @@ def local_time_dst(std_offset=-5 * 3600):
     DAY = offset_time[2]
     HOUR = offset_time[3]
     MINUTE = offset_time[4]
-
-def get_current_time_in_RTC():
-    now = time.localtime(time.time() - 14400)
-    modified = (
-        now[0],
-        now[1],
-        now[2],
-        now[6],
-        now[3],
-        now[4],
-        now[5],
-        0
-    )  
-    return modified
+    SECOND = offset_time[5]
 
 def manage_wifi(action='connect', useLEDs=True):
     if is_off_hours():
@@ -393,7 +400,6 @@ def get_color(color, brightness, blueRed=False, greenRed=False):
     return tuple(round(level * f) for f in table.get(key, OFF))
 
 def set_pixel(strip, i, rgb):
-    """Set one pixel; return True only if it actually changed."""
     if strip[i] == rgb:
         return False
     strip[i] = rgb
@@ -414,14 +420,18 @@ def set_LEDs(strip=None, pinMap=None, color='', brightness=50, RGBValue=(0, 0, 0
         fill_strips(NP.values(), RGBValue)
     elif pinMap:
         changed = False
-        for hour, value in pinMap.items():
-            if hour == HOUR:
-                level = 100
-            elif hour < HOUR:
-                level = round(brightness / 4)
-            else:
-                level = brightness
-            changed |= set_pixel(strip, HOURS_MAP.index(hour), rgb_for(value, level))
+        if is_clock():
+            key = 'RAIN' if strip is NP['RAIN'] else 'TEMP'
+            changed = set_clock_pixels(strip, key, pinMap, brightness, blueRed, greenRed)
+        else:
+            for hour, value in pinMap.items():
+                if hour == HOUR:
+                    level = 100
+                elif hour < HOUR:
+                    level = round(brightness / 4)
+                else:
+                    level = brightness
+                changed |= set_pixel(strip, HOURS_MAP.index(hour), rgb_for(value, level))
         if changed:
             strip.write()          # one write per pass, and only if something changed
     elif startPin is not None:
@@ -438,14 +448,66 @@ def set_LEDs(strip=None, pinMap=None, color='', brightness=50, RGBValue=(0, 0, 0
     else:
         fill_strips(NP.values(), rgb_for(color))
 
-def create_pin_dict():
+def create_pin_dict(clock):
     log('Initializing pin dictionary')
     pin_data = {}
+    if clock:
+        return pin_data     # clock mode just uses whatever hours the forecast returns
     for hour in range(CONFIG['LED']['FIRST_BAR_HOUR'], CONFIG['LED']['FIRST_BAR_HOUR']+CONFIG['LED']['TOTAL_COUNT']):
-        pin_data[hour] = None
+        pin_data[hour] = None 
     return pin_data
 
-def generate_hours_map():
+def is_clock():
+    return CONFIG['LED'].get('TYPE') == 'clock'
+
+def generate_clock_map():
+    #Work out how the two rings are split into per-hour groups of LEDs.
+    global CLOCK
+    led = CONFIG['LED']
+    outer_per, inner_per = [int(x) for x in led.get('CLOCK_RATIO', '10:4').split(':')]
+    hours = led['OUTER_RING'] // outer_per
+    if hours * outer_per != led['OUTER_RING'] or hours * inner_per != led['INNER_RING']:
+        raise ValueError('OUTER_RING / INNER_RING do not divide evenly by CLOCK_RATIO')
+    CLOCK = {
+        'HOURS': hours,                                    # hour groups around each ring (12)
+        'PER_HOUR': {'RAIN': outer_per, 'TEMP': inner_per},  # LEDs per hour group, per ring
+        'FIRST': led.get('CLOCK_FIRST_HOUR', 12) % hours,
+        'CW': led.get('CLOCK_DIRECTION', 'cw') == 'cw',
+    }
+    log(f'Clock map: {hours} hour groups, LEDs per hour {CLOCK["PER_HOUR"]}')
+
+def clock_group(hour):
+    #Position (0..HOURS-1) of an hour's LED group around the ring.
+    offset = (hour - CLOCK['FIRST']) % CLOCK['HOURS']
+    return offset if CLOCK['CW'] else (-offset) % CLOCK['HOURS']
+
+def clock_marker(per_hour):
+    #Index (within the current hour's group) of the LED nearest the current time.
+    seconds = (MINUTE * 60) + SECOND
+    return min(seconds * per_hour // 3600, per_hour - 1)
+
+def set_clock_pixels(strip, key, pinMap, brightness, blueRed=False, greenRed=False):
+    #Paint a ring: the next HOURS hours, one group of LEDs per hour.
+    #In the current hour's group the LED at the current time is 100%, LEDs already passed are dimmed.
+    per_hour = CLOCK['PER_HOUR'][key]
+    mark = clock_marker(per_hour)
+    changed = False
+    for ahead in range(CLOCK['HOURS']):
+        hour = (HOUR + ahead) % 24
+        value = pinMap.get(hour)
+        start = clock_group(hour) * per_hour
+        for i in range(per_hour):
+            if ahead == 0 and i == mark:
+                level = 100
+            elif ahead == 0 and i < mark:
+                level = round(brightness / 4)
+            else:
+                level = brightness
+            rgb = get_color(value, level, blueRed, greenRed) if isinstance(value, (int, float)) else OFF
+            changed |= set_pixel(strip, start + i, rgb)
+    return changed
+
+def generate_bar_hours_map():
     global HOURS_MAP
     hoursRange = range(CONFIG['LED']['FIRST_BAR_HOUR'], CONFIG['LED']['FIRST_BAR_HOUR']+CONFIG['LED']['TOTAL_COUNT'])
     if CONFIG['LED']['CABLE_SIDE'] == 'right':
@@ -453,25 +515,35 @@ def generate_hours_map():
     else:
         HOURS_MAP = list(hoursRange)
 
-def map_hours_to_pins():
+def map_hours_to_pins(clock):
     log('Mapping hours to pins')
-    pinData = create_pin_dict()
+    pinData = create_pin_dict(clock)
     hoursMap = WeatherGOV().main()
     log('  Mapping hour data to pin data')
-    for hour in pinData:
-        if hour in hoursMap.keys():
+    
+    if clock:
+        for hour in hoursMap.keys():
             log(f'    >> Mapping hour {hour} to {hoursMap[hour]}')
             pinData[hour] = hoursMap[hour]
-        else:
-            log(f'    >> Mapping hour {hour} to off')
-            pinData[hour] = {'rain': 'off', 'temp': 'off'}
+    else:
+        for hour in pinData:
+            if hour in hoursMap.keys():
+                log(f'    >> Mapping hour {hour} to {hoursMap[hour]}')
+                pinData[hour] = hoursMap[hour]
+            else:
+                log(f'    >> Mapping hour {hour} to off')
+                pinData[hour] = {'rain': 'off', 'temp': 'off'}
     set_LEDs(strip=NP['TEMP'], color='cyan', brightness=1)
     return pinData
 
 def is_off_hours():
+    if 'HOUR' not in globals():
+        return False
     return HOUR >= CONFIG['LED']['OFF_HOUR'] or HOUR < CONFIG['LED']['ON_HOUR']
 
 def send_map_to_leds(pinData):
+    if is_clock():
+        local_time_dst()    # network calls take a while, re-read the time right before drawing
     rainData = {}
     for hour in pinData.keys():
         value = pinData[hour]
@@ -517,12 +589,25 @@ def log(message, initialize=False, write_to_file=False):
             f.write(Run_Log)
         return
 
-def main_loop(initialized):
+def refresh_due():
+    return PIN_DATA is None or time.time() - LAST_REFRESH >= CONFIG['TIME_BETWEEN_CHECKS_M'] * 60
+
+def main_loop(initialized, clock):
+    global PIN_DATA, LAST_REFRESH
     log('Starting Main Loop', initialize=True)
     useLEDs = False if initialized else True
     try:
+        if clock and initialized and not refresh_due():
+            # Clock mode wakes every LED step: no network, just move the marker using the cached forecast
+            log('Clock step: advancing marker from cached forecast')
+            local_time_dst()
+            if is_off_hours():
+                set_LEDs(color='off')
+                return
+            send_map_to_leds(PIN_DATA)
+            return
         manage_wifi('connect')
-        validate_internet_connection(useLEDs)
+        validate_internet_connection(useLEDs=useLEDs)
         update_RTC(useLEDs)
         local_time_dst()
         if is_off_hours():
@@ -530,7 +615,8 @@ def main_loop(initialized):
             set_LEDs(color='off')
             return
         Check_for_updates().main()
-        hourMap = map_hours_to_pins()
+        hourMap = map_hours_to_pins(clock)
+        PIN_DATA, LAST_REFRESH = hourMap, time.time()
         send_map_to_leds(hourMap)
         return
     except Exception as e:
@@ -541,11 +627,15 @@ def main():
     print('Starting up....')
     intialized = False
     load_config()
+    clock = is_clock()
     init_neopixel()
     set_LEDs(color='cyan', brightness=10)
-    generate_hours_map()
+    if clock:
+        generate_clock_map()
+    else:
+        generate_bar_hours_map()
     while True:
-        main_loop(intialized)
+        main_loop(intialized, clock)
         delay()
         intialized = True
 

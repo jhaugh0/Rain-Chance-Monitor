@@ -48,7 +48,9 @@ BASE_CONFIG = {
         "RED_THRESHOLD_START" : 50,
         "TYPE" : "bar",              # "bar" (default) or "clock"
         "CLOCK_FIRST_HOUR" : 12,     # clock only: hour shown by LED 0 of each ring
-        "CLOCK_DIRECTION" : "cw"     # clock only: "cw" or "ccw", direction LED numbers increase
+        "CLOCK_DIRECTION" : "cw",     # clock only: "cw" or "ccw", direction LED numbers increase
+        "OUTER_RING" : 120,            # clock only: number of LEDs in outer ring
+        "INNER_RING" : 48             # clock only: number of LEDs in inner
     }
 }
 

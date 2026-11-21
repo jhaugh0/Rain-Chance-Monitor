@@ -3,7 +3,11 @@ import time
 import network
 import machine
 import os
+import gc
 import json
+import socket
+import select
+import binascii
 import urequests as r
 from neopixel import NeoPixel
 
@@ -12,22 +16,37 @@ CONFIG_FILE = "config.json"
 VERSION_TRACKER_FILE = 'version.txt'
 RUN_LOG = 'run.log'
 ERROR_LOG = 'error.log'
+FORCE_SETUP_FILE = 'force_setup'   # written by the web page to boot straight into the setup hotspot
 Run_Log = ''
 CLOCK = {}          # filled by generate_clock_map() when LED TYPE is 'clock'
 PIN_DATA = None     # last forecast pulled from weather.gov (reused between LED steps)
 LAST_REFRESH = 0    # time.time() of the last full network refresh
+FORCE_REFRESH = False   # set by the web page to pull a new forecast immediately
 
 RTC = machine.RTC()
 WLAN = network.WLAN(network.STA_IF)
+AP = network.WLAN(network.AP_IF)
+AP_MODE = False         # True while broadcasting the setup hotspot
+CONFIG_ERROR = ''       # set if the LEDs could not be initialised from the config
+WEB = None              # listening HTTP socket
+DNS = None              # captive-portal DNS socket (hotspot mode only)
+POLLER = None
+RESTART_PENDING = False
+UPTIME_MS = 0
+_LAST_TICKS = time.ticks_ms()
 
 BASE_CONFIG = {
     "TIME_BETWEEN_CHECKS_M" : 15,
+    "AUTO_UPDATE" : True,                  # pull main.py from GitHub at ON_HOUR / OFF_HOUR
     "NETWORK" : {
         "SSID" : "",
         "PSK" : "",
         "MAX_REQUEST_RETRIES" : 5,
         "REQUEST_RETRY_DELAY_SECONDS" : 5,
-        "INTERNET_CHECK_RETRY_SECONDS" : 5
+        "INTERNET_CHECK_RETRY_SECONDS" : 5,
+        "CONNECT_TIMEOUT_SECONDS" : 30,    # give up on SSID after this long and start the hotspot
+        "AP_PSK" : "",                     # hotspot password, 8+ chars, blank = open hotspot
+        "AP_RETRY_MINUTES" : 10            # while in hotspot mode, retry SSID this often (0 = never)
     },
     "LOCATION": {
         "LATITUDE" : "",
@@ -51,7 +70,25 @@ BASE_CONFIG = {
         "CLOCK_DIRECTION" : "cw",     # clock only: "cw" or "ccw", direction LED numbers increase
         "OUTER_RING" : 120,            # clock only: number of LEDs in outer ring
         "INNER_RING" : 48             # clock only: number of LEDs in inner
+    },
+    "WEB" : {
+        "PORT" : 80,
+        "PASSWORD" : ""              # blank = no login; otherwise user "admin" + this password
     }
+}
+
+# Settings that only take effect after a restart (hardware / network setup).
+RESTART_KEYS = (
+    'NETWORK.SSID', 'NETWORK.PSK', 'NETWORK.AP_PSK', 'WEB.PORT',
+    'LED.TYPE', 'LED.CABLE_SIDE', 'LED.TEMP_STRIP', 'LED.RAIN_GPIO_PIN', 'LED.TEMP_GPIO_PIN',
+    'LED.FIRST_BAR_HOUR', 'LED.TOTAL_COUNT', 'LED.CLOCK_FIRST_HOUR', 'LED.CLOCK_DIRECTION',
+    'LED.OUTER_RING', 'LED.INNER_RING', 'LED.CLOCK_RATIO',
+)
+# Settings limited to a fixed set of values (shown as drop-downs on the web page).
+CHOICES = {
+    'LED.TYPE': ['bar', 'clock'],
+    'LED.CABLE_SIDE': ['left', 'right'],
+    'LED.CLOCK_DIRECTION': ['cw', 'ccw'],
 }
 
 OFF = (0, 0, 0)
@@ -61,6 +98,7 @@ NAMED = {
     'blue':   (0, 0, 1),
     'yellow': (1, 1, 0),
     'cyan':   (0, 1, 1),
+    'magenta':(1, 0, 1),
     'white':  (1, 1, 1),
     'off':    OFF,
 }
@@ -134,6 +172,9 @@ class Check_for_updates():
         with open('main.py', 'w') as f:
             f.write(file)
     def main(self):
+        if not CONFIG.get('AUTO_UPDATE', True):
+            log('  >> AUTO_UPDATE is disabled, skipping update check')
+            return
         if HOUR != CONFIG['LED']['ON_HOUR'] and HOUR != CONFIG['LED']['OFF_HOUR'] and MINUTE != 0:
             log('  >> Not the ON_HOUR or OFF_HOUR, skipping update check')
             set_LEDs(strip=NP['RAIN'], color='yellow', brightness=1)
@@ -189,7 +230,19 @@ class WeatherGOV():
         endpoint = self.get_point()
         forecast = self.get_forecast(endpoint)
         filtered = self.filter_forecast(forecast)
-        return filtered   
+        return filtered
+
+def wait(seconds, interruptible=False):
+    # Drop-in for time.sleep() that keeps answering web requests while it waits.
+    # interruptible=True returns early when the web page asks for a refresh.
+    end = time.ticks_add(time.ticks_ms(), int(seconds * 1000))
+    while True:
+        remaining = time.ticks_diff(end, time.ticks_ms())
+        if remaining <= 0 or (interruptible and FORCE_REFRESH):
+            return
+        step = min(remaining, 250)
+        if not service_web(step):
+            time.sleep_ms(step)
 
 def delay():
     now = time.localtime()
@@ -206,28 +259,49 @@ def delay():
         check_seconds = CONFIG['TIME_BETWEEN_CHECKS_M'] * 60
         delay = seconds_to_hour if seconds_to_hour <= check_seconds else check_seconds
     log(f'  Delaying for {delay} seconds, resume time: {time.localtime(time.time() + delay)}')
-    time.sleep(delay)
+    wait(delay, interruptible=True)
+
+def copy_value(value):
+    return json.loads(json.dumps(value))
+
+def merge_defaults(config, base):
+    # Add any missing keys (at every level) from base into config. Returns True if anything was added.
+    changed = False
+    for key, value in base.items():
+        if key not in config:
+            config[key] = copy_value(value)
+            changed = True
+        elif isinstance(value, dict):
+            if isinstance(config[key], dict):
+                changed = merge_defaults(config[key], value) or changed
+            else:
+                config[key] = copy_value(value)
+                changed = True
+    return changed
+
+def read_config_file():
+    with open(CONFIG_FILE, 'r') as f:
+        config = json.loads(f.read())
+    if not isinstance(config, dict):
+        raise ValueError('config is not a JSON object')
+    return config
+
+def write_config(config):
+    with open(CONFIG_FILE, 'w') as f:
+        f.write(json.dumps(config))
 
 def load_config():
     global CONFIG
     log('Loading configuration')
     try:
-        with open(CONFIG_FILE, 'r') as f:
-            log(f'  Reading configuration from {CONFIG_FILE}')
-            config = json.loads(f.read())
-            log(f'  >> Configuration loaded: {config}')
-    except:
-        log('Failed to load configuration, writing default test config')
-        write_test_config()
-        load_config()
-    update = False
-    for key, value in BASE_CONFIG.items():
-        if key not in config:
-            config[key] = value
-            update = True
-    if update:
-        with open(CONFIG_FILE, 'w') as f:
-            f.write(json.dumps(config))
+        log(f'  Reading configuration from {CONFIG_FILE}')
+        config = read_config_file()
+        log(f'  >> Configuration loaded: {config}')
+    except Exception as e:
+        log(f'Failed to load configuration ({e}), writing default config')
+        config = {}
+    if merge_defaults(config, BASE_CONFIG):
+        write_config(config)
     CONFIG = config
 
 def dump_current_config():
@@ -260,7 +334,7 @@ def make_network_request_with_retry(url, message):
             log(f'  {message}, retry {retries}/{CONFIG['NETWORK']['MAX_REQUEST_RETRIES']}')
             retries = retries + 1
             log(f'  Pausing {CONFIG['NETWORK']['REQUEST_RETRY_DELAY_SECONDS']} seconds before next attempt')
-            time.sleep(CONFIG['NETWORK']['REQUEST_RETRY_DELAY_SECONDS'])
+            wait(CONFIG['NETWORK']['REQUEST_RETRY_DELAY_SECONDS'])
         if 'response' in locals():
             log(f'  >> status code: {response.status_code}')
         if retries == CONFIG['NETWORK']['MAX_REQUEST_RETRIES']:
@@ -286,28 +360,52 @@ def _nth_sunday(year, month, n):
     wd = time.localtime(time.mktime((year, month, 1, 0, 0, 0, 0, 0)))[6]  # Mon=0
     return 1 + (6 - wd) % 7 + 7 * (n - 1)
 
-def local_time_dst(std_offset=-5 * 3600):
-    global HOUR, DAY, MINUTE, SECOND
+def local_now(std_offset=-5 * 3600):
     utc = time.time()
     y = time.localtime(utc)[0]
     start = time.mktime((y, 3, _nth_sunday(y, 3, 2), 2, 0, 0, 0, 0)) - std_offset
     end = time.mktime((y, 11, _nth_sunday(y, 11, 1), 2, 0, 0, 0, 0)) - (std_offset + 3600)
     offset = std_offset + 3600 if start <= utc < end else std_offset
-    offset_time = time.localtime(utc + offset)
+    return time.localtime(utc + offset)
+
+def local_time_dst(std_offset=-5 * 3600):
+    global HOUR, DAY, MINUTE, SECOND
+    offset_time = local_now(std_offset)
     DAY = offset_time[2]
     HOUR = offset_time[3]
     MINUTE = offset_time[4]
     SECOND = offset_time[5]
 
+def hostname():
+    return 'LEDWeatherMonitor' + str(CONFIG['LED'].get('TYPE', 'bar'))
+
+def set_hostname():
+    # Must run before the interface connects so DHCP (and mDNS <name>.local) use it.
+    name = hostname()
+    try:
+        network.hostname(name)                  # MicroPython 1.20+
+    except Exception:
+        try:
+            WLAN.config(dhcp_hostname=name)     # older firmware
+        except Exception as e:
+            log(f'  Could not set hostname: {e}')
+            return
+    log(f'Hostname set to {name}')
+
 def manage_wifi(action='connect', useLEDs=True):
+    # 'connect' returns True once connected, False if it gave up after CONNECT_TIMEOUT_SECONDS.
     if is_off_hours():
         useLEDs = False
     if action == 'connect':
         log('Connecting WiFi')
         log(f'  Using wifi info:\n    SSID: {CONFIG['NETWORK']['SSID']}\n    PSK:  {CONFIG['NETWORK']['PSK']}')
         if not WLAN.isconnected():
+            if not CONFIG['NETWORK']['SSID']:
+                log('  No SSID configured')
+                return False
             if useLEDs:
                 set_LEDs(color='off')
+            set_hostname()
             WLAN.active(True)
             WLAN.config(pm=WLAN.PM_NONE)
             time.sleep(.5)
@@ -316,22 +414,30 @@ def manage_wifi(action='connect', useLEDs=True):
             if os.uname().sysname == 'rp2':
                 log('Disabling rp2 specific WiFi power saving settings')
                 WLAN.config(pm = 0xa11140)
+            timeout_ms = CONFIG['NETWORK'].get('CONNECT_TIMEOUT_SECONDS', 30) * 1000
+            started = time.ticks_ms()
             start_pin = 0
             while True:
                 log(f'    IP: {WLAN.ifconfig()[0]}. StartPin: {start_pin}')
-                if WLAN.ifconfig()[0] == '0.0.0.0':
-                    if useLEDs:
-                        start_pin = set_LEDs(strip=NP['RAIN'], color='cyan', startPin=start_pin, brightness=5)
-                    time.sleep(1)
-                else:
+                if WLAN.isconnected() and WLAN.ifconfig()[0] != '0.0.0.0':
                     log('Connected!')
                     log(f'  >> IP: {WLAN.ifconfig()[0]}')
                     if useLEDs:
                         set_LEDs(color='white', brightness=1)
-                    break
+                    return True
+                if time.ticks_diff(time.ticks_ms(), started) > timeout_ms:
+                    log(f'  Could not connect to {CONFIG['NETWORK']['SSID']} within {timeout_ms // 1000} seconds')
+                    try:
+                        WLAN.disconnect()       # stop the driver retrying in the background
+                    except Exception:
+                        pass
+                    return False
+                if useLEDs:
+                    start_pin = set_LEDs(strip=NP['RAIN'], color='cyan', startPin=start_pin, brightness=5)
+                wait(1)
         else:
             log(f"Already connected to wifi: {str(WLAN.ifconfig())}")
-            return
+            return True
     elif action == 'disconnect':
         log('Disconnecting WiFi')
         if WLAN.active():
@@ -363,12 +469,12 @@ def validate_internet_connection(tries_before_reconnect=10, max_tries=20, useLED
                 log(f'  Internet connection not functional yet. Retry #{retries}/{max_tries}. Reconnecting wifi to troubleshoot')
                 manage_wifi('disconnect')
                 log('Delaying 20 seconds')
-                time.sleep(20)
+                wait(20)
                 manage_wifi('connect')
             else:
                 log(f'  Internet connection not functional yet. Retry #{retries}/{max_tries}. Trying again in {CONFIG['NETWORK']['INTERNET_CHECK_RETRY_SECONDS']} seconds')
                 log(f'Error: {e}')
-            time.sleep(CONFIG['NETWORK']['INTERNET_CHECK_RETRY_SECONDS'])
+            wait(CONFIG['NETWORK']['INTERNET_CHECK_RETRY_SECONDS'])
             retries = retries + 1
 
 def update_RTC(useLEDs=True):
@@ -388,6 +494,7 @@ def update_RTC(useLEDs=True):
             log(f'  Failed to get NTP time, retry {retries+1}/{CONFIG['NETWORK']['MAX_REQUEST_RETRIES']}')
             retries = retries + 1
             log(f'  Pausing {CONFIG['NETWORK']['REQUEST_RETRY_DELAY_SECONDS']} seconds before next attempt')
+            wait(CONFIG['NETWORK']['REQUEST_RETRY_DELAY_SECONDS'])
         if retries == CONFIG['NETWORK']['MAX_REQUEST_RETRIES']:
             return None
 
@@ -415,6 +522,8 @@ def fill_strips(strips, rgb):
         s.write()
 
 def set_LEDs(strip=None, pinMap=None, color='', brightness=50, RGBValue=(0, 0, 0), startPin=None, blueRed=False, greenRed=False):
+    if 'NP' not in globals():
+        return          # LEDs failed to initialise (bad config), nothing to draw on
     brightness = min(brightness, 100)
     def rgb_for(value, level=brightness):
         return get_color(value, level, blueRed, greenRed)
@@ -456,7 +565,7 @@ def create_pin_dict(clock):
     if clock:
         return pin_data     # clock mode just uses whatever hours the forecast returns
     for hour in range(CONFIG['LED']['FIRST_BAR_HOUR'], CONFIG['LED']['FIRST_BAR_HOUR']+CONFIG['LED']['TOTAL_COUNT']):
-        pin_data[hour] = None 
+        pin_data[hour] = None
     return pin_data
 
 def is_clock():
@@ -522,7 +631,7 @@ def map_hours_to_pins(clock):
     pinData = create_pin_dict(clock)
     hoursMap = WeatherGOV().main()
     log('  Mapping hour data to pin data')
-    
+
     if clock:
         for hour in hoursMap.keys():
             log(f'    >> Mapping hour {hour} to {hoursMap[hour]}')
@@ -586,16 +695,456 @@ def log(message, initialize=False, write_to_file=False):
         Run_Log = message + '\n'
         return
     Run_Log = Run_Log + message + '\n'
+    if len(Run_Log) > 6000:
+        Run_Log = Run_Log[-4000:]       # keep RAM use bounded (the web page can show this)
     if write_to_file:
         with open(RUN_LOG, 'w') as f:
             f.write(Run_Log)
         return
 
+
+# ---------------------------------------------------------------------------
+# Setup hotspot + web configuration page
+# ---------------------------------------------------------------------------
+
+def start_access_point():
+    global AP_MODE
+    log('Starting setup hotspot')
+    try:
+        WLAN.disconnect()
+    except Exception:
+        pass
+    WLAN.active(False)
+    set_hostname()
+    ssid = hostname()
+    psk = CONFIG['NETWORK'].get('AP_PSK', '')
+    AP.active(True)
+    if len(psk) >= 8:
+        AP.config(essid=ssid, password=psk, authmode=getattr(network, 'AUTH_WPA2_PSK', 3))
+    else:
+        if psk:
+            log('  AP_PSK is shorter than 8 characters, hotspot will be open')
+        AP.config(essid=ssid, authmode=getattr(network, 'AUTH_OPEN', 0))
+    AP_MODE = True
+    log(f'  Hotspot "{ssid}" is up, browse to http://{AP.ifconfig()[0]}/')
+
+def start_web_server():
+    global WEB, POLLER
+    if WEB is not None:
+        return
+    port = int(CONFIG['WEB'].get('PORT', 80))
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(socket.getaddrinfo('0.0.0.0', port)[0][-1])
+        s.listen(3)
+        s.setblocking(False)
+    except Exception as e:
+        log(f'Failed to start web server on port {port}: {e}')
+        return
+    WEB = s
+    POLLER = select.poll()
+    POLLER.register(s, select.POLLIN)
+    log(f'Web server listening on http://{current_ip()}:{port}/ (http://{hostname()}.local/)')
+
+def start_dns():
+    # Answers every DNS lookup with the hotspot's IP so phones pop up the setup page.
+    global DNS
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(socket.getaddrinfo('0.0.0.0', 53)[0][-1])
+        s.setblocking(False)
+    except Exception as e:
+        log(f'Captive portal DNS not started: {e}')
+        return
+    DNS = s
+    if POLLER is not None:
+        POLLER.register(s, select.POLLIN)
+
+def dns_reply():
+    try:
+        data, addr = DNS.recvfrom(512)
+    except OSError:
+        return
+    if len(data) < 17:
+        return
+    i = 12
+    while i < len(data) and data[i] != 0:
+        i += data[i] + 1
+    question = data[12:i + 5]
+    ip = bytes(int(x) for x in AP.ifconfig()[0].split('.'))
+    reply = (data[:2] + b'\x81\x80' + data[4:6] + data[4:6] + b'\x00\x00\x00\x00' + question +
+             b'\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04' + ip)
+    try:
+        DNS.sendto(reply, addr)
+    except OSError:
+        pass
+
+def service_web(timeout_ms=0):
+    # Handle any pending web/DNS traffic, blocking up to timeout_ms. Returns False if no server is running.
+    if POLLER is None:
+        return False
+    uptime_seconds()
+    try:
+        events = POLLER.poll(timeout_ms)
+    except Exception:
+        return False
+    if events:
+        if DNS is not None:
+            dns_reply()
+        accept_clients()
+    if RESTART_PENDING:
+        log('Restart requested from web page')
+        time.sleep(1)
+        machine.reset()
+    return True
+
+def accept_clients():
+    for _ in range(4):          # don't let a burst of requests starve the LEDs
+        try:
+            conn, addr = WEB.accept()
+        except OSError:
+            return
+        try:
+            conn.settimeout(5)
+            handle_http(conn)
+        except Exception as e:
+            log(f'  Web request error: {e}')
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        gc.collect()
+
+def read_request(conn):
+    data = b''
+    while data.find(b'\r\n\r\n') < 0:
+        chunk = conn.recv(512)
+        if not chunk:
+            break
+        data += chunk
+        if len(data) > 4096:
+            raise ValueError('request headers too large')
+    split = data.find(b'\r\n\r\n')
+    head = data[:split] if split >= 0 else data
+    body = data[split + 4:] if split >= 0 else b''
+    lines = head.decode().split('\r\n')
+    parts = lines[0].split(' ')
+    method = parts[0] if parts else ''
+    path = parts[1].split('?')[0] if len(parts) > 1 else '/'
+    headers = {}
+    for line in lines[1:]:
+        if ':' in line:
+            k, v = line.split(':', 1)
+            headers[k.strip().lower()] = v.strip()
+    length = int(headers.get('content-length', 0) or 0)
+    if length > 16384:
+        raise ValueError('request body too large')
+    while len(body) < length:
+        chunk = conn.recv(min(1024, length - len(body)))
+        if not chunk:
+            break
+        body += chunk
+    return method, path, headers, body
+
+def respond(conn, body, status='200 OK', ctype='application/json', extra=''):
+    if isinstance(body, str):
+        body = body.encode()
+    elif not isinstance(body, bytes):
+        body = json.dumps(body).encode()
+    head = 'HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n{}\r\n'
+    conn.sendall(head.format(status, ctype, len(body), extra).encode())
+    for i in range(0, len(body), 1024):
+        conn.sendall(body[i:i + 1024])
+
+def authorized(headers):
+    password = CONFIG.get('WEB', {}).get('PASSWORD', '')
+    if not password:
+        return True
+    token = binascii.b2a_base64(('admin:' + password).encode()).decode().strip()
+    return headers.get('authorization', '') == 'Basic ' + token
+
+def handle_http(conn):
+    global FORCE_REFRESH, RESTART_PENDING
+    method, path, headers, body = read_request(conn)
+    if not authorized(headers):
+        return respond(conn, 'Login required', '401 Unauthorized', 'text/plain',
+                       'WWW-Authenticate: Basic realm="LEDWeatherMonitor"\r\n')
+    if path in ('/', '/index.html'):
+        respond(conn, PAGE_HTML, ctype='text/html; charset=utf-8')
+    elif path == '/api/info':
+        respond(conn, device_info())
+    elif path == '/api/config' and method == 'GET':
+        respond(conn, {'config': read_saved_config(), 'base': BASE_CONFIG,
+                       'choices': CHOICES, 'restart_keys': RESTART_KEYS})
+    elif path == '/api/config' and method == 'POST':
+        save_config_from_web(conn, body)
+    elif path == '/api/log':
+        respond(conn, {'run': Run_Log, 'error': read_text(ERROR_LOG)})
+    elif path == '/api/refresh' and method == 'POST':
+        FORCE_REFRESH = True
+        respond(conn, {'ok': True})
+    elif path == '/api/restart' and method == 'POST':
+        respond(conn, {'ok': True})
+        RESTART_PENDING = True
+    elif path == '/api/setup-mode' and method == 'POST':
+        with open(FORCE_SETUP_FILE, 'w') as f:
+            f.write('1')
+        respond(conn, {'ok': True})
+        RESTART_PENDING = True
+    elif AP_MODE:
+        # Captive portal: send phones' connectivity checks to the setup page.
+        respond(conn, '', '302 Found', 'text/plain', 'Location: http://' + AP.ifconfig()[0] + '/\r\n')
+    else:
+        respond(conn, {'errors': ['not found']}, '404 Not Found')
+
+def read_text(path, limit=3000):
+    try:
+        with open(path, 'r') as f:
+            return f.read()[-limit:]
+    except Exception:
+        return ''
+
+def read_saved_config():
+    try:
+        config = read_config_file()
+        merge_defaults(config, BASE_CONFIG)
+        return config
+    except Exception:
+        return copy_value(CONFIG)
+
+def check_types(new, base, path, errors):
+    # Validate (and gently coerce) values for keys that exist in BASE_CONFIG. New keys are accepted as-is.
+    for key, default in base.items():
+        if key not in new:
+            continue
+        value = new[key]
+        name = path + key
+        if isinstance(default, dict):
+            if isinstance(value, dict):
+                check_types(value, default, name + '.', errors)
+            else:
+                errors.append(name + ' must be a section')
+        elif isinstance(default, bool):
+            if not isinstance(value, bool):
+                errors.append(name + ' must be true or false')
+        elif isinstance(default, (int, float)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                errors.append(name + ' must be a number')
+            elif isinstance(default, int) and value == int(value):
+                new[key] = int(value)
+        elif isinstance(default, str) and not isinstance(value, str):
+            new[key] = str(value)
+        if name in CHOICES and new[key] not in CHOICES[name]:
+            errors.append(name + ' must be one of ' + ', '.join(CHOICES[name]))
+
+def get_path(config, path):
+    section, key = path.split('.')
+    return config.get(section, {}).get(key)
+
+def apply_live(new):
+    # Use the new settings right away, except hardware/network ones which wait for a restart.
+    global CONFIG
+    live = copy_value(new)
+    for path in RESTART_KEYS:
+        section, key = path.split('.')
+        if key in CONFIG.get(section, {}):
+            live[section][key] = CONFIG[section][key]
+        elif key in live.get(section, {}):
+            del live[section][key]
+    CONFIG = live
+
+def save_config_from_web(conn, body):
+    global FORCE_REFRESH
+    try:
+        new = json.loads(body.decode())
+        if not isinstance(new, dict):
+            raise ValueError('configuration must be a JSON object')
+        errors = []
+        check_types(new, BASE_CONFIG, '', errors)
+        if errors:
+            return respond(conn, {'ok': False, 'errors': errors}, '400 Bad Request')
+        merge_defaults(new, BASE_CONFIG)
+        old = read_saved_config()
+        write_config(new)
+    except Exception as e:
+        return respond(conn, {'ok': False, 'errors': [str(e)]}, '400 Bad Request')
+    restart = any(get_path(old, p) != get_path(new, p) for p in RESTART_KEYS)
+    restart = restart or any(get_path(CONFIG, p) != get_path(new, p) for p in RESTART_KEYS)
+    apply_live(new)
+    FORCE_REFRESH = True
+    log('Configuration saved from web page')
+    respond(conn, {'ok': True, 'restart_required': restart})
+
+def current_ip():
+    if AP_MODE:
+        return AP.ifconfig()[0]
+    return WLAN.ifconfig()[0] if WLAN.active() else '0.0.0.0'
+
+def uptime_seconds():
+    global UPTIME_MS, _LAST_TICKS
+    now = time.ticks_ms()
+    UPTIME_MS += time.ticks_diff(now, _LAST_TICKS)
+    _LAST_TICKS = now
+    return UPTIME_MS // 1000
+
+def fmt_duration(seconds):
+    d, seconds = divmod(int(seconds), 86400)
+    h, seconds = divmod(seconds, 3600)
+    m = seconds // 60
+    return (str(d) + 'd ' if d else '') + str(h) + 'h ' + str(m) + 'm'
+
+def fmt_bytes(n):
+    return str(round(n / 1024, 1)) + ' KB'
+
+def device_info():
+    info = []
+    def add(label, fn):
+        try:
+            info.append([label, fn()])
+        except Exception as e:
+            info.append([label, 'n/a'])
+    u = os.uname()
+    add('Hostname', hostname)
+    add('Display type', lambda: CONFIG['LED'].get('TYPE', 'bar'))
+    add('Mode', lambda: 'Setup hotspot (could not join Wi-Fi)' if AP_MODE else 'Connected to Wi-Fi')
+    if AP_MODE:
+        add('Hotspot name', lambda: AP.config('essid'))
+        add('Hotspot clients', lambda: len(AP.status('stations')))
+        add('IP address', lambda: AP.ifconfig()[0])
+        add('Saved Wi-Fi network', lambda: CONFIG['NETWORK']['SSID'] or '(none)')
+    else:
+        add('Wi-Fi network', lambda: WLAN.config('essid'))
+        add('IP address', lambda: WLAN.ifconfig()[0])
+        add('Signal', lambda: str(WLAN.status('rssi')) + ' dBm')
+    add('MAC address', lambda: binascii.hexlify((AP if AP_MODE else WLAN).config('mac'), ':').decode())
+    add('Board', lambda: u.machine)
+    add('Firmware', lambda: u.sysname + ' ' + u.release)
+    add('CPU', lambda: str(machine.freq() // 1000000) + ' MHz')
+    add('Free memory', lambda: fmt_bytes(gc.mem_free()))
+    add('Free flash', lambda: fmt_bytes(os.statvfs('/')[0] * os.statvfs('/')[3]))
+    add('Uptime', lambda: fmt_duration(uptime_seconds()))
+    def clock_text():
+        if time.localtime()[0] < 2024:
+            return 'not synced yet'
+        t = local_now()
+        return '{:04d}-{:02d}-{:02d} {:02d}:{:02d}'.format(t[0], t[1], t[2], t[3], t[4])
+    add('Local time', clock_text)
+    add('Last forecast', lambda: ('never' if PIN_DATA is None else fmt_duration(time.time() - LAST_REFRESH) + ' ago'))
+    add('Code version', lambda: (read_text(VERSION_TRACKER_FILE)[:7] or 'unknown'))
+    if CONFIG_ERROR:
+        info.append(['Config problem', CONFIG_ERROR])
+    add('Last error', lambda: read_text(ERROR_LOG, 300) or 'none')
+    return info
+
+PAGE_HTML = r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LED Weather Monitor</title><style>
+:root{--bg:#f4f5f7;--card:#fff;--fg:#1d2330;--mut:#6b7280;--line:#dde1e7;--acc:#2563eb;--bad:#dc2626;--ok:#15803d}
+@media(prefers-color-scheme:dark){:root{--bg:#111418;--card:#1b2027;--fg:#e6e9ee;--mut:#9aa3af;--line:#2d343e;--acc:#3b82f6;--bad:#f87171;--ok:#4ade80}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,sans-serif}
+main{max-width:760px;margin:auto;padding:16px}h1{font-size:20px;margin:4px 0 16px}h2{font-size:16px;margin:0 0 12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:5px 4px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--mut);font-weight:500;width:40%}td{overflow-wrap:anywhere}
+button{font:inherit;padding:7px 12px;border-radius:7px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
+button.p{background:var(--acc);border-color:var(--acc);color:#fff}button.d{color:var(--bad)}
+.row{display:flex;gap:8px;align-items:center;padding:4px 0;flex-wrap:wrap}
+.row label{flex:1 1 220px;font-family:ui-monospace,monospace;font-size:13px;overflow-wrap:anywhere}
+.row input:not([type=checkbox]),.row select{flex:1 1 200px;min-width:0;padding:6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit}
+fieldset{border:1px solid var(--line);border-radius:8px;margin:10px 0;padding:6px 12px}legend{font-weight:600;padding:0 4px}
+.add{border-top:1px dashed var(--line);margin-top:6px;padding-top:8px}.add input,.add select{flex:1 1 120px!important}
+.x{padding:2px 8px;font-size:12px}.r{color:var(--mut);font-size:12px;margin-left:6px}.hint{color:var(--mut);font-size:13px}
+.bar{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}#msg{margin-top:10px;min-height:1.4em}.err{color:var(--bad)}.ok{color:var(--ok)}
+pre{white-space:pre-wrap;font-size:12px;max-height:360px;overflow:auto;background:var(--bg);padding:8px;border-radius:6px}
+</style></head><body><main><h1>LED Weather Monitor</h1>
+<div class="card"><h2>Device</h2><table id="info"><tr><td>Loading…</td></tr></table>
+<div class="bar"><button onclick="act('/api/refresh','Forecast refresh requested.')">Refresh forecast now</button>
+<button onclick="restart()">Restart</button><button onclick="restart('/api/setup-mode')">Restart into setup hotspot</button></div></div>
+<div class="card"><h2>Configuration</h2><div id="cfg">Loading…</div>
+<p class="hint">↻ takes effect after a restart. Use the row at the bottom of a section to add a new setting.</p>
+<div class="bar"><button class="p" onclick="save(false)">Save</button><button onclick="save(true)">Save &amp; restart</button>
+<button onclick="loadConfig()">Discard changes</button></div><div id="msg"></div></div>
+<div class="card"><h2>Logs</h2><button onclick="loadLogs()">Load logs</button><pre id="log" hidden></pre></div>
+</main><script>
+const $=s=>document.querySelector(s);let cfg={},base={},choices={},rk=[],host='';
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]);
+function el(t,a,...kids){const e=document.createElement(t);Object.assign(e,a||{});for(const k of kids)e.append(k);return e}
+async function api(p,o){try{const r=await fetch(p,o);const j=await r.json();if(!r.ok&&!j.errors)j.errors=['HTTP '+r.status];return j}catch(e){return{errors:[String(e)]}}}
+function msg(t,c){const m=$('#msg');m.textContent=t;m.className=c||''}
+const isObj=v=>v&&typeof v=='object'&&!Array.isArray(v);
+async function loadInfo(){const d=await api('/api/info');if(!Array.isArray(d))return;
+$('#info').innerHTML=d.map(([k,v])=>'<tr><th>'+esc(k)+'</th><td>'+esc(v)+'</td></tr>').join('');const h=d.find(x=>x[0]=='Hostname');if(h)host=h[1]}
+async function loadConfig(){const d=await api('/api/config');if(!d.config){$('#cfg').textContent='Failed to load: '+(d.errors||[]).join(', ');return}
+cfg=d.config;base=d.base;choices=d.choices;rk=d.restart_keys;render();msg('')}
+function render(){$('#cfg').replaceChildren(section(cfg,base,''))}
+function delBtn(o,k){return el('button',{className:'x d',textContent:'Remove',title:'Remove '+k,onclick:()=>{delete o[k];render()}})}
+function section(o,b,path){const box=el('div');
+for(const k of Object.keys(o)){const p=path+k,inBase=!!b&&k in b;
+if(isObj(o[k])){const lg=el('legend',{},k+' ');if(!inBase)lg.append(delBtn(o,k));box.append(el('fieldset',{},lg,section(o[k],inBase?b[k]:null,p+'.')))}
+else box.append(field(o,k,p,inBase))}
+box.append(adder(o));return box}
+function field(o,k,p,inBase){const v=o[k];let inp;
+if(choices[p]){inp=el('select');for(const c of choices[p])inp.append(el('option',{value:c,textContent:c,selected:c==v}));inp.onchange=()=>o[k]=inp.value}
+else if(typeof v=='boolean'){inp=el('input',{type:'checkbox',checked:v});inp.onchange=()=>o[k]=inp.checked}
+else if(typeof v=='number'){inp=el('input',{type:'number',step:'any',value:v});inp.oninput=()=>{if(inp.value!=='')o[k]=Number(inp.value)}}
+else if(Array.isArray(v)){inp=el('input',{value:JSON.stringify(v)});inp.oninput=()=>{try{o[k]=JSON.parse(inp.value);inp.style.outline=''}catch(e){inp.style.outline='2px solid red'}}}
+else{const s=/PSK|PASSWORD/i.test(k);inp=el('input',{type:s?'password':'text',value:v==null?'':v});if(s){inp.onfocus=()=>inp.type='text';inp.onblur=()=>inp.type='password'}inp.oninput=()=>o[k]=inp.value}
+const lab=el('label',{textContent:k});if(rk.includes(p))lab.append(el('span',{className:'r',textContent:'↻',title:'Takes effect after a restart'}));
+const row=el('div',{className:'row'},lab,inp);if(!inBase)row.append(delBtn(o,k));return row}
+function adder(o){const n=el('input',{placeholder:'new setting name'}),t=el('select');
+for(const x of ['text','number','true/false','section'])t.append(el('option',{textContent:x}));
+const b=el('button',{textContent:'Add',onclick:()=>{const k=n.value.trim();if(!k)return msg('Enter a name for the new setting','err');
+if(k in o)return msg(k+' already exists','err');o[k]={text:'',number:0,'true/false':false,section:{}}[t.value];render();msg('Added '+k+' (not saved yet)')}});
+return el('div',{className:'row add'},n,t,b)}
+async function save(andRestart){msg('Saving…');const d=await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
+if(!d.ok)return msg('Not saved: '+(d.errors||[]).join('; '),'err');
+if(andRestart)return restart(null,true);
+msg(d.restart_required?'Saved. Some changes take effect after a restart.':'Saved and applied.','ok');loadInfo()}
+async function restart(path,skip){if(!skip&&!confirm('Restart the device?'))return;await api(path||'/api/restart',{method:'POST'});
+msg('Restarting… this page reloads in 20 seconds. If the device changed networks, find it at http://'+host+'.local/','ok');setTimeout(()=>location.reload(),20000)}
+async function act(p,t){const d=await api(p,{method:'POST'});msg(d.ok?t:'Failed: '+(d.errors||[]).join('; '),d.ok?'ok':'err')}
+async function loadLogs(){const d=await api('/api/log');const l=$('#log');l.hidden=false;l.textContent=(d.error?'--- error.log ---\n'+d.error+'\n\n':'')+'--- run log ---\n'+(d.run||'')}
+loadInfo();loadConfig();setInterval(loadInfo,15000);
+</script></body></html>'''
+
+def run_setup_mode():
+    # Broadcast the hotspot and serve the config page. Never returns:
+    # periodically retries the saved Wi-Fi and restarts into normal mode once it works.
+    start_access_point()
+    start_web_server()
+    start_dns()
+    set_LEDs(color='magenta', brightness=5)
+    retry_ms = CONFIG['NETWORK'].get('AP_RETRY_MINUTES', 10) * 60000
+    last_try = time.ticks_ms()
+    while True:
+        wait(5)
+        if retry_ms <= 0 or not CONFIG['NETWORK']['SSID']:
+            continue
+        if time.ticks_diff(time.ticks_ms(), last_try) < retry_ms:
+            continue
+        last_try = time.ticks_ms()
+        try:
+            clients = len(AP.status('stations'))
+        except Exception:
+            clients = 0
+        if clients:
+            log('Someone is connected to the setup hotspot, not retrying Wi-Fi yet')
+            continue
+        log('Retrying saved Wi-Fi network from setup mode')
+        if manage_wifi('connect', useLEDs=False):
+            log('Wi-Fi is back, restarting into normal mode')
+            time.sleep(1)
+            machine.reset()
+        WLAN.active(False)
+        set_LEDs(color='magenta', brightness=5)
+
 def refresh_due():
-    return PIN_DATA is None or time.time() - LAST_REFRESH >= CONFIG['TIME_BETWEEN_CHECKS_M'] * 60
+    return FORCE_REFRESH or PIN_DATA is None or time.time() - LAST_REFRESH >= CONFIG['TIME_BETWEEN_CHECKS_M'] * 60
 
 def main_loop(initialized, clock):
-    global PIN_DATA, LAST_REFRESH
+    global PIN_DATA, LAST_REFRESH, FORCE_REFRESH
     log('Starting Main Loop', initialize=True)
     useLEDs = False if initialized else True
     try:
@@ -608,6 +1157,7 @@ def main_loop(initialized, clock):
                 return
             send_map_to_leds(PIN_DATA)
             return
+        FORCE_REFRESH = False
         manage_wifi('connect')
         validate_internet_connection(useLEDs=useLEDs)
         update_RTC(useLEDs)
@@ -626,16 +1176,39 @@ def main_loop(initialized, clock):
         log(f'Error occurred: {e}', write_to_file=True)
 
 def main():
+    global CONFIG_ERROR
     print('Starting up....')
     intialized = False
     load_config()
     clock = is_clock()
-    init_neopixel()
-    set_LEDs(color='cyan', brightness=10)
-    if clock:
-        generate_clock_map()
-    else:
-        generate_bar_hours_map()
+    try:
+        init_neopixel()
+        set_LEDs(color='cyan', brightness=10)
+        if clock:
+            generate_clock_map()
+        else:
+            generate_bar_hours_map()
+    except Exception as e:
+        # Keep going so the web page is reachable to fix the setting.
+        CONFIG_ERROR = 'LED setup failed: ' + str(e)
+        log(CONFIG_ERROR)
+        write_error_log(CONFIG_ERROR)
+    set_hostname()
+    try:
+        AP.active(False)
+    except Exception:
+        pass
+    force_setup = FORCE_SETUP_FILE in os.listdir()
+    if force_setup:
+        os.remove(FORCE_SETUP_FILE)
+        log('Setup hotspot requested from web page')
+    if force_setup or not manage_wifi('connect'):
+        run_setup_mode()        # never returns
+    start_web_server()
+    if CONFIG_ERROR:
+        log('Not driving LEDs until the configuration is fixed on the web page')
+        while True:
+            wait(60)
     while True:
         main_loop(intialized, clock)
         delay()

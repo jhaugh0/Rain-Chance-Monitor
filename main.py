@@ -48,28 +48,35 @@ BASE_CONFIG = {
         "AP_PSK" : "",                     # hotspot password, 8+ chars, blank = open hotspot
         "AP_RETRY_MINUTES" : 10            # while in hotspot mode, retry SSID this often (0 = never)
     },
-    "LOCATION": {
-        "LATITUDE" : "",
-        "LONGITUDE" : "",
-        "TIME_REGION" : "America/New_York"
-    },
-    "LED" : {
-        "CABLE_SIDE" : "right",
-        "TEMP_STRIP": True,
+    "HARDWARE" : {
         "RAIN_GPIO_PIN" : 35,
         "TEMP_GPIO_PIN" : 37,
+        "TYPE" : "clock",
+        "CLOCK_CONFIG" : {
+            "DIRECTION" : "cw",
+            "OUTER_RING" : 120,
+            "INNER_RING" : 48,
+            "FIRST_HOUR" : 12
+        },
+        "BAR_CONFIG" : {
+            "CABLE_SIDE" : "right",
+            "TEMPERATURE_STRIP": True,
+            "FIRST_HOUR" : 8,
+            "TOTAL_COUNT" : 15
+        }
+    },
+    "TIME" : {
+        "TIMEZONE" : "America/New_York",
+        "DST" : True                 # follow US daylight saving (ignored for zones that don't observe it)
+    },
+    "LOCATION": {
+        "LATITUDE" : "",
+        "LONGITUDE" : ""
+    },
+    "LED" : {                        # applies to both bar and clock displays
         "ON_HOUR" : 7,
         "OFF_HOUR" : 22,
-        "FIRST_BAR_HOUR" : 8,
-        "TOTAL_COUNT" : 15,
-        "BRIGHTNESS" : 10,
-        "YELLOW_THRESHOLD_START" : 30,
-        "RED_THRESHOLD_START" : 50,
-        "TYPE" : "bar",              # "bar" (default) or "clock"
-        "CLOCK_FIRST_HOUR" : 12,     # clock only: hour shown by LED 0 of each ring
-        "CLOCK_DIRECTION" : "cw",     # clock only: "cw" or "ccw", direction LED numbers increase
-        "OUTER_RING" : 120,            # clock only: number of LEDs in outer ring
-        "INNER_RING" : 48             # clock only: number of LEDs in inner
+        "BRIGHTNESS" : 10
     },
     "WEB" : {
         "PORT" : 80,
@@ -77,19 +84,50 @@ BASE_CONFIG = {
     }
 }
 
-# Settings that only take effect after a restart (hardware / network setup).
-RESTART_KEYS = (
-    'NETWORK.SSID', 'NETWORK.PSK', 'NETWORK.AP_PSK', 'WEB.PORT',
-    'LED.TYPE', 'LED.CABLE_SIDE', 'LED.TEMP_STRIP', 'LED.RAIN_GPIO_PIN', 'LED.TEMP_GPIO_PIN',
-    'LED.FIRST_BAR_HOUR', 'LED.TOTAL_COUNT', 'LED.CLOCK_FIRST_HOUR', 'LED.CLOCK_DIRECTION',
-    'LED.OUTER_RING', 'LED.INNER_RING', 'LED.CLOCK_RATIO',
+# Settings that only take effect after a restart. A section path (e.g. 'HARDWARE')
+# covers everything inside it, including settings added later from the web page.
+RESTART_KEYS = ('NETWORK.SSID', 'NETWORK.PSK', 'NETWORK.AP_PSK', 'WEB.PORT', 'HARDWARE')
+
+# (name, standard UTC offset in hours, observes DST). weather.gov is US-only, so US zones.
+TIMEZONE_LIST = (
+    ('America/New_York', -5, True),
+    ('America/Chicago', -6, True),
+    ('America/Denver', -7, True),
+    ('America/Phoenix', -7, False),
+    ('America/Los_Angeles', -8, True),
+    ('America/Anchorage', -9, True),
+    ('Pacific/Honolulu', -10, False),
+    ('America/Puerto_Rico', -4, False),
 )
+TIMEZONES = {name: (hours, dst) for name, hours, dst in TIMEZONE_LIST}
+
 # Settings limited to a fixed set of values (shown as drop-downs on the web page).
 CHOICES = {
-    'LED.TYPE': ['bar', 'clock'],
-    'LED.CABLE_SIDE': ['left', 'right'],
-    'LED.CLOCK_DIRECTION': ['cw', 'ccw'],
+    'HARDWARE.TYPE': ['bar', 'clock'],
+    'HARDWARE.CLOCK_CONFIG.DIRECTION': ['cw', 'ccw'],
+    'HARDWARE.BAR_CONFIG.CABLE_SIDE': ['left', 'right'],
+    'TIME.TIMEZONE': [z[0] for z in TIMEZONE_LIST],
 }
+
+# Old flat config.json keys -> new location (None = obsolete, just remove). Applied once at load.
+LEGACY_KEYS = (
+    ('LED.TYPE', 'HARDWARE.TYPE'),
+    ('LED.RAIN_GPIO_PIN', 'HARDWARE.RAIN_GPIO_PIN'),
+    ('LED.TEMP_GPIO_PIN', 'HARDWARE.TEMP_GPIO_PIN'),
+    ('LED.OUTER_RING', 'HARDWARE.CLOCK_CONFIG.OUTER_RING'),
+    ('LED.INNER_RING', 'HARDWARE.CLOCK_CONFIG.INNER_RING'),
+    ('LED.CLOCK_FIRST_HOUR', 'HARDWARE.CLOCK_CONFIG.FIRST_HOUR'),
+    ('LED.CLOCK_DIRECTION', 'HARDWARE.CLOCK_CONFIG.DIRECTION'),
+    ('LED.CLOCK_RATIO', 'HARDWARE.CLOCK_CONFIG.RATIO'),
+    ('LED.CABLE_SIDE', 'HARDWARE.BAR_CONFIG.CABLE_SIDE'),
+    ('LED.TEMP_STRIP', 'HARDWARE.BAR_CONFIG.TEMPERATURE_STRIP'),
+    ('LED.FIRST_BAR_HOUR', 'HARDWARE.BAR_CONFIG.FIRST_HOUR'),
+    ('LED.TOTAL_COUNT', 'HARDWARE.BAR_CONFIG.TOTAL_COUNT'),
+    ('LOCATION.TIME_REGION', 'TIME.TIMEZONE'),
+    ('LED.YELLOW_THRESHOLD_START', None),
+    ('LED.RED_THRESHOLD_START', None),
+)
+MISSING = object()
 
 OFF = (0, 0, 0)
 NAMED = {
@@ -249,7 +287,6 @@ def delay():
     seconds_into_hour = (now[4] * 60) + now[5]
     if is_clock() and not is_off_hours():
         # Wake exactly when the clock hand crosses into the next outer-ring LED,
-        # i.e. 3600 / LEDs_per_hour seconds apart (360s for 10 LEDs per hour).
         per_hour = CLOCK['PER_HOUR']['RAIN']
         next_led = (seconds_into_hour * per_hour // 3600) + 1
         next_boundary = -(-next_led * 3600 // per_hour)      # ceil, handles uneven divisions
@@ -263,6 +300,46 @@ def delay():
 
 def copy_value(value):
     return json.loads(json.dumps(value))
+
+def get_path(config, path, default=None):
+    # get_path(CONFIG, 'HARDWARE.CLOCK_CONFIG.OUTER_RING') -> value, or default if any level is missing
+    node = config
+    for part in path.split('.'):
+        if not isinstance(node, dict) or part not in node:
+            return default
+        node = node[part]
+    return node
+
+def set_path(config, path, value):
+    parts = path.split('.')
+    node = config
+    for part in parts[:-1]:
+        if not isinstance(node.get(part), dict):
+            node[part] = {}
+        node = node[part]
+    node[parts[-1]] = value
+
+def del_path(config, path):
+    parts = path.split('.')
+    parent = get_path(config, '.'.join(parts[:-1])) if len(parts) > 1 else config
+    if isinstance(parent, dict) and parts[-1] in parent:
+        del parent[parts[-1]]
+        return True
+    return False
+
+def migrate_config(config):
+    # Move settings from the old flat LED layout into the nested one. Returns True if anything changed.
+    changed = False
+    for old, new in LEGACY_KEYS:
+        value = get_path(config, old, MISSING)
+        if value is MISSING:
+            continue
+        if new and get_path(config, new, MISSING) is MISSING:
+            set_path(config, new, value)
+            log(f'  >> Moved setting {old} to {new}')
+        del_path(config, old)
+        changed = True
+    return changed
 
 def merge_defaults(config, base):
     # Add any missing keys (at every level) from base into config. Returns True if anything was added.
@@ -300,7 +377,8 @@ def load_config():
     except Exception as e:
         log(f'Failed to load configuration ({e}), writing default config')
         config = {}
-    if merge_defaults(config, BASE_CONFIG):
+    migrated = migrate_config(config)
+    if merge_defaults(config, BASE_CONFIG) or migrated:
         write_config(config)
     CONFIG = config
 
@@ -312,16 +390,19 @@ def init_neopixel():
     log('Initializing NeoPixel Variables')
     global NP
     NP = {}
-    rain_pin = machine.Pin(CONFIG['LED']['RAIN_GPIO_PIN'], machine.Pin.OUT)
+    hw = CONFIG['HARDWARE']
+    rain_pin = machine.Pin(hw['RAIN_GPIO_PIN'], machine.Pin.OUT)
     if is_clock():
-        temp_pin = machine.Pin(CONFIG['LED']['TEMP_GPIO_PIN'], machine.Pin.OUT)
-        NP['RAIN'] = NeoPixel(rain_pin, CONFIG['LED']['OUTER_RING'])
-        NP['TEMP'] = NeoPixel(temp_pin, CONFIG['LED']['INNER_RING'])
+        ring = clock_cfg()
+        temp_pin = machine.Pin(hw['TEMP_GPIO_PIN'], machine.Pin.OUT)
+        NP['RAIN'] = NeoPixel(rain_pin, ring['OUTER_RING'])
+        NP['TEMP'] = NeoPixel(temp_pin, ring['INNER_RING'])
     else:
-        NP['RAIN'] = NeoPixel(rain_pin, CONFIG['LED']['TOTAL_COUNT'])
-        if CONFIG['LED']['TEMP_STRIP']:
-            temp_pin = machine.Pin(CONFIG['LED']['TEMP_GPIO_PIN'], machine.Pin.OUT)
-            NP['TEMP'] = NeoPixel(temp_pin, CONFIG['LED']['TOTAL_COUNT'])
+        bar = bar_cfg()
+        NP['RAIN'] = NeoPixel(rain_pin, bar['TOTAL_COUNT'])
+        if bar['TEMPERATURE_STRIP']:
+            temp_pin = machine.Pin(hw['TEMP_GPIO_PIN'], machine.Pin.OUT)
+            NP['TEMP'] = NeoPixel(temp_pin, bar['TOTAL_COUNT'])
 
 def make_network_request_with_retry(url, message):
     log(f'  Making GET request to {url}')
@@ -340,44 +421,35 @@ def make_network_request_with_retry(url, message):
         if retries == CONFIG['NETWORK']['MAX_REQUEST_RETRIES']:
             return None
 
-def get_local_timenow_time(useLEDs=True):
-    log('Getting local time from time.now')
-    if is_off_hours():
-        useLEDs = False
-    url = 'https://time.now/developer/api/timezone/'
-    url = url + CONFIG['LOCATION']['TIME_REGION']
-    response = make_network_request_with_retry(url, message='Failed to get time')
-    if response:
-        global HOUR, DAY
-        log(f'  >> Local time {response['datetime']} returned')
-        HOUR = int(response['datetime'].split('T')[1].split(":")[0])
-        DAY = int(response['datetime'].split('T')[0].split("-")[2])
-        log(f'  >> Parsed time: {HOUR}:{DAY}')
-        if useLEDs:
-            set_LEDs(strip=NP['TEMP'], color='yellow', brightness=1)
-
 def _nth_sunday(year, month, n):
     wd = time.localtime(time.mktime((year, month, 1, 0, 0, 0, 0, 0)))[6]  # Mon=0
     return 1 + (6 - wd) % 7 + 7 * (n - 1)
 
-def local_now(std_offset=-5 * 3600):
+def local_now():
+    # Local time from TIME.TIMEZONE / TIME.DST (US daylight saving rules).
+    settings = CONFIG.get('TIME', {})
+    hours, observes_dst = TIMEZONES.get(settings.get('TIMEZONE'), (-5, True))
+    std_offset = hours * 3600
     utc = time.time()
-    y = time.localtime(utc)[0]
-    start = time.mktime((y, 3, _nth_sunday(y, 3, 2), 2, 0, 0, 0, 0)) - std_offset
-    end = time.mktime((y, 11, _nth_sunday(y, 11, 1), 2, 0, 0, 0, 0)) - (std_offset + 3600)
-    offset = std_offset + 3600 if start <= utc < end else std_offset
+    offset = std_offset
+    if observes_dst and settings.get('DST', True):
+        y = time.localtime(utc)[0]
+        start = time.mktime((y, 3, _nth_sunday(y, 3, 2), 2, 0, 0, 0, 0)) - std_offset
+        end = time.mktime((y, 11, _nth_sunday(y, 11, 1), 2, 0, 0, 0, 0)) - (std_offset + 3600)
+        if start <= utc < end:
+            offset += 3600
     return time.localtime(utc + offset)
 
-def local_time_dst(std_offset=-5 * 3600):
+def local_time_dst():
     global HOUR, DAY, MINUTE, SECOND
-    offset_time = local_now(std_offset)
+    offset_time = local_now()
     DAY = offset_time[2]
     HOUR = offset_time[3]
     MINUTE = offset_time[4]
     SECOND = offset_time[5]
 
 def hostname():
-    return 'LEDWeatherMonitor' + str(CONFIG['LED'].get('TYPE', 'bar'))
+    return 'LEDWeatherMonitor' + str(CONFIG['HARDWARE'].get('TYPE', 'bar'))
 
 def set_hostname():
     # Must run before the interface connects so DHCP (and mDNS <name>.local) use it.
@@ -458,7 +530,7 @@ def validate_internet_connection(tries_before_reconnect=10, max_tries=20, useLED
             if response.status_code == 200:
                 log(f'  Internet appears to be connected, Public IP: {response.text.strip()}')
                 if useLEDs:
-                    set_LEDs(strip=NP['TEMP'], color='blue', brightness=1)
+                    set_LEDs(strip=temp_strip(), color='blue', brightness=1)
                 return True
         except Exception as e:
             if retries == max_tries:
@@ -546,7 +618,7 @@ def set_LEDs(strip=None, pinMap=None, color='', brightness=50, RGBValue=(0, 0, 0
         if changed:
             strip.write()          # one write per pass, and only if something changed
     elif startPin is not None:
-        if startPin >= CONFIG['LED']['TOTAL_COUNT']:
+        if startPin >= min(len(s) for s in NP.values()):
             set_LEDs(color='off')
             return 0
         rgb = rgb_for(color)       # computed once instead of three times
@@ -564,26 +636,37 @@ def create_pin_dict(clock):
     pin_data = {}
     if clock:
         return pin_data     # clock mode just uses whatever hours the forecast returns
-    for hour in range(CONFIG['LED']['FIRST_BAR_HOUR'], CONFIG['LED']['FIRST_BAR_HOUR']+CONFIG['LED']['TOTAL_COUNT']):
+    bar = bar_cfg()
+    for hour in range(bar['FIRST_HOUR'], bar['FIRST_HOUR'] + bar['TOTAL_COUNT']):
         pin_data[hour] = None
     return pin_data
 
 def is_clock():
-    return CONFIG['LED'].get('TYPE') == 'clock'
+    return CONFIG['HARDWARE'].get('TYPE') == 'clock'
+
+def clock_cfg():
+    return CONFIG['HARDWARE']['CLOCK_CONFIG']
+
+def bar_cfg():
+    return CONFIG['HARDWARE']['BAR_CONFIG']
+
+def temp_strip():
+    # The temperature strip/ring, or the rain strip when a bar display has no temperature strip.
+    return NP['TEMP'] if 'TEMP' in NP else NP['RAIN']
 
 def generate_clock_map():
     #Work out how the two rings are split into per-hour groups of LEDs.
     global CLOCK
-    led = CONFIG['LED']
-    outer_per, inner_per = [int(x) for x in led.get('CLOCK_RATIO', '10:4').split(':')]
-    hours = led['OUTER_RING'] // outer_per
-    if hours * outer_per != led['OUTER_RING'] or hours * inner_per != led['INNER_RING']:
-        raise ValueError('OUTER_RING / INNER_RING do not divide evenly by CLOCK_RATIO')
+    ring = clock_cfg()
+    outer_per, inner_per = [int(x) for x in ring.get('RATIO', '10:4').split(':')]
+    hours = ring['OUTER_RING'] // outer_per
+    if hours * outer_per != ring['OUTER_RING'] or hours * inner_per != ring['INNER_RING']:
+        raise ValueError('OUTER_RING / INNER_RING do not divide evenly by RATIO')
     CLOCK = {
         'HOURS': hours,                                    # hour groups around each ring (12)
         'PER_HOUR': {'RAIN': outer_per, 'TEMP': inner_per},  # LEDs per hour group, per ring
-        'FIRST': led.get('CLOCK_FIRST_HOUR', 12) % hours,
-        'CW': led.get('CLOCK_DIRECTION', 'cw') == 'cw',
+        'FIRST': ring.get('FIRST_HOUR', 12) % hours,
+        'CW': ring.get('DIRECTION', 'cw') == 'cw',
     }
     log(f'Clock map: {hours} hour groups, LEDs per hour {CLOCK["PER_HOUR"]}')
 
@@ -620,8 +703,9 @@ def set_clock_pixels(strip, key, pinMap, brightness, blueRed=False, greenRed=Fal
 
 def generate_bar_hours_map():
     global HOURS_MAP
-    hoursRange = range(CONFIG['LED']['FIRST_BAR_HOUR'], CONFIG['LED']['FIRST_BAR_HOUR']+CONFIG['LED']['TOTAL_COUNT'])
-    if CONFIG['LED']['CABLE_SIDE'] == 'right':
+    bar = bar_cfg()
+    hoursRange = range(bar['FIRST_HOUR'], bar['FIRST_HOUR'] + bar['TOTAL_COUNT'])
+    if bar['CABLE_SIDE'] == 'right':
         HOURS_MAP = list(reversed(hoursRange))
     else:
         HOURS_MAP = list(hoursRange)
@@ -644,7 +728,7 @@ def map_hours_to_pins(clock):
             else:
                 log(f'    >> Mapping hour {hour} to off')
                 pinData[hour] = {'rain': 'off', 'temp': 'off'}
-    set_LEDs(strip=NP['TEMP'], color='cyan', brightness=1)
+    set_LEDs(strip=temp_strip(), color='cyan', brightness=1)
     return pinData
 
 def is_off_hours():
@@ -660,7 +744,7 @@ def send_map_to_leds(pinData):
         value = pinData[hour]
         rainData[hour] = value['rain']
     set_LEDs(strip=NP['RAIN'], pinMap=rainData, brightness=CONFIG['LED']['BRIGHTNESS'], greenRed=True)
-    if CONFIG['LED']['TEMP_STRIP']:
+    if 'TEMP' in NP:            # clock inner ring, or bar TEMPERATURE_STRIP
         tempData = {}
         for hour in pinData.keys():
             value = pinData[hour]
@@ -940,20 +1024,16 @@ def check_types(new, base, path, errors):
         if name in CHOICES and new[key] not in CHOICES[name]:
             errors.append(name + ' must be one of ' + ', '.join(CHOICES[name]))
 
-def get_path(config, path):
-    section, key = path.split('.')
-    return config.get(section, {}).get(key)
-
 def apply_live(new):
     # Use the new settings right away, except hardware/network ones which wait for a restart.
     global CONFIG
     live = copy_value(new)
     for path in RESTART_KEYS:
-        section, key = path.split('.')
-        if key in CONFIG.get(section, {}):
-            live[section][key] = CONFIG[section][key]
-        elif key in live.get(section, {}):
-            del live[section][key]
+        running = get_path(CONFIG, path, MISSING)
+        if running is MISSING:
+            del_path(live, path)
+        else:
+            set_path(live, path, copy_value(running))
     CONFIG = live
 
 def save_config_from_web(conn, body):
@@ -1008,7 +1088,7 @@ def device_info():
             info.append([label, 'n/a'])
     u = os.uname()
     add('Hostname', hostname)
-    add('Display type', lambda: CONFIG['LED'].get('TYPE', 'bar'))
+    add('Display type', lambda: CONFIG['HARDWARE'].get('TYPE', 'bar'))
     add('Mode', lambda: 'Setup hotspot (could not join Wi-Fi)' if AP_MODE else 'Connected to Wi-Fi')
     if AP_MODE:
         add('Hotspot name', lambda: AP.config('essid'))
@@ -1041,68 +1121,102 @@ def device_info():
 
 PAGE_HTML = r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>LED Weather Monitor</title><style>
-:root{--bg:#f4f5f7;--card:#fff;--fg:#1d2330;--mut:#6b7280;--line:#dde1e7;--acc:#2563eb;--bad:#dc2626;--ok:#15803d}
-@media(prefers-color-scheme:dark){:root{--bg:#111418;--card:#1b2027;--fg:#e6e9ee;--mut:#9aa3af;--line:#2d343e;--acc:#3b82f6;--bad:#f87171;--ok:#4ade80}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,sans-serif}
-main{max-width:760px;margin:auto;padding:16px}h1{font-size:20px;margin:4px 0 16px}h2{font-size:16px;margin:0 0 12px}
+:root{--bg:#f4f5f7;--card:#fff;--sec:#f8f9fb;--fg:#1d2330;--mut:#6b7280;--line:#dde1e7;--acc:#2563eb;--bad:#dc2626;--ok:#15803d}
+@media(prefers-color-scheme:dark){:root{--bg:#111418;--card:#1b2027;--sec:#161a20;--fg:#e6e9ee;--mut:#9aa3af;--line:#2d343e;--acc:#60a5fa;--bad:#f87171;--ok:#4ade80}}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,sans-serif}
+main{max-width:780px;margin:auto;padding:16px}h1{font-size:20px;margin:4px 0 16px}h2{font-size:16px;margin:0}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+.head{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}.head h2{margin-right:auto}
 table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:5px 4px;border-bottom:1px solid var(--line);vertical-align:top}
 th{color:var(--mut);font-weight:500;width:40%}td{overflow-wrap:anywhere}
 button{font:inherit;padding:7px 12px;border-radius:7px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
-button.p{background:var(--acc);border-color:var(--acc);color:#fff}button.d{color:var(--bad)}
-.row{display:flex;gap:8px;align-items:center;padding:4px 0;flex-wrap:wrap}
-.row label{flex:1 1 220px;font-family:ui-monospace,monospace;font-size:13px;overflow-wrap:anywhere}
-.row input:not([type=checkbox]),.row select{flex:1 1 200px;min-width:0;padding:6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit}
-fieldset{border:1px solid var(--line);border-radius:8px;margin:10px 0;padding:6px 12px}legend{font-weight:600;padding:0 4px}
-.add{border-top:1px dashed var(--line);margin-top:6px;padding-top:8px}.add input,.add select{flex:1 1 120px!important}
-.x{padding:2px 8px;font-size:12px}.r{color:var(--mut);font-size:12px;margin-left:6px}.hint{color:var(--mut);font-size:13px}
-.bar{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}#msg{margin-top:10px;min-height:1.4em}.err{color:var(--bad)}.ok{color:var(--ok)}
+button.p{background:var(--acc);border-color:var(--acc);color:#fff}button.d{color:var(--bad)}button.s{padding:4px 10px;font-size:13px}
+.row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr) auto;gap:4px 10px;align-items:center;padding:5px 0;border-bottom:1px solid var(--line)}
+.row label{font:13px ui-monospace,monospace;overflow-wrap:anywhere}
+.row input:not([type=checkbox]),.row select,.add input,.add select{width:100%;min-width:0;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit}
+.row input[type=checkbox]{justify-self:start;width:18px;height:18px;margin:6px 0}
+details.sec{border:1px solid var(--line);border-radius:8px;margin:10px 0;background:var(--sec)}
+details.sec details.sec{background:var(--card)}details.sec details.sec details.sec{background:var(--sec)}
+summary{cursor:pointer;padding:9px 12px;display:flex;gap:8px;align-items:center;list-style:none;font-weight:600;user-select:none}
+summary::-webkit-details-marker{display:none}
+.chev{color:var(--mut);display:inline-block;width:12px;transition:transform .15s}details[open]>summary .chev{transform:rotate(90deg)}
+.cnt{color:var(--mut);font-weight:400;font-size:13px}summary .d{margin-left:auto}
+.grp{padding:0 12px 10px}#cfg>.grp{padding:0}
+.x{padding:2px 8px;font-size:12px}.r{color:var(--acc);font-size:13px;margin-left:4px;cursor:help}
+.addbtn{margin-top:8px;font-size:13px;padding:4px 10px;color:var(--acc);border-style:dashed;background:transparent}
+.add{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr) auto auto;gap:8px;margin-top:8px}
+.hint{color:var(--mut);font-size:13px;margin:12px 0 0}
+.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px}#dirty{color:var(--mut);font-size:13px}
+#msg{margin-top:10px;min-height:1.4em}.err{color:var(--bad)}.ok{color:var(--ok)}
 pre{white-space:pre-wrap;font-size:12px;max-height:360px;overflow:auto;background:var(--bg);padding:8px;border-radius:6px}
+@media(max-width:560px){.row{grid-template-columns:minmax(0,1fr) auto}.row label{grid-column:1/-1}.add{grid-template-columns:1fr 1fr}}
 </style></head><body><main><h1>LED Weather Monitor</h1>
-<div class="card"><h2>Device</h2><table id="info"><tr><td>Loading…</td></tr></table>
+<div class="card"><div class="head"><h2>Device</h2></div><table id="info"><tr><td>Loading…</td></tr></table>
 <div class="bar"><button onclick="act('/api/refresh','Forecast refresh requested.')">Refresh forecast now</button>
 <button onclick="restart()">Restart</button><button onclick="restart('/api/setup-mode')">Restart into setup hotspot</button></div></div>
-<div class="card"><h2>Configuration</h2><div id="cfg">Loading…</div>
-<p class="hint">↻ takes effect after a restart. Use the row at the bottom of a section to add a new setting.</p>
+<div class="card"><div class="head"><h2>Configuration</h2><button class="s" onclick="setAll(true)">Expand all</button><button class="s" onclick="setAll(false)">Collapse all</button></div>
+<div id="cfg">Loading…</div>
+<p class="hint"><span class="r">↻</span> takes effect after a restart. On a section it applies to everything inside it.</p>
 <div class="bar"><button class="p" onclick="save(false)">Save</button><button onclick="save(true)">Save &amp; restart</button>
-<button onclick="loadConfig()">Discard changes</button></div><div id="msg"></div></div>
-<div class="card"><h2>Logs</h2><button onclick="loadLogs()">Load logs</button><pre id="log" hidden></pre></div>
+<button onclick="discard()">Discard changes</button><span id="dirty"></span></div><div id="msg"></div></div>
+<div class="card"><div class="head"><h2>Logs</h2><button class="s" onclick="loadLogs()">Load logs</button></div><pre id="log" hidden></pre></div>
 </main><script>
-const $=s=>document.querySelector(s);let cfg={},base={},choices={},rk=[],host='';
+const $=s=>document.querySelector(s);let cfg={},base={},choices={},rk=[],host='',dirty=false;const closed=new Set();
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]);
+const isObj=v=>v!==null&&typeof v=='object'&&!Array.isArray(v);
 function el(t,a,...kids){const e=document.createElement(t);Object.assign(e,a||{});for(const k of kids)e.append(k);return e}
 async function api(p,o){try{const r=await fetch(p,o);const j=await r.json();if(!r.ok&&!j.errors)j.errors=['HTTP '+r.status];return j}catch(e){return{errors:[String(e)]}}}
 function msg(t,c){const m=$('#msg');m.textContent=t;m.className=c||''}
-const isObj=v=>v&&typeof v=='object'&&!Array.isArray(v);
+function setDirty(v){dirty=v;$('#dirty').textContent=v?'Unsaved changes':''}
+window.onbeforeunload=e=>{if(dirty){e.preventDefault();e.returnValue=''}};
 async function loadInfo(){const d=await api('/api/info');if(!Array.isArray(d))return;
 $('#info').innerHTML=d.map(([k,v])=>'<tr><th>'+esc(k)+'</th><td>'+esc(v)+'</td></tr>').join('');const h=d.find(x=>x[0]=='Hostname');if(h)host=h[1]}
 async function loadConfig(){const d=await api('/api/config');if(!d.config){$('#cfg').textContent='Failed to load: '+(d.errors||[]).join(', ');return}
-cfg=d.config;base=d.base;choices=d.choices;rk=d.restart_keys;render();msg('')}
-function render(){$('#cfg').replaceChildren(section(cfg,base,''))}
-function delBtn(o,k){return el('button',{className:'x d',textContent:'Remove',title:'Remove '+k,onclick:()=>{delete o[k];render()}})}
-function section(o,b,path){const box=el('div');
-for(const k of Object.keys(o)){const p=path+k,inBase=!!b&&k in b;
-if(isObj(o[k])){const lg=el('legend',{},k+' ');if(!inBase)lg.append(delBtn(o,k));box.append(el('fieldset',{},lg,section(o[k],inBase?b[k]:null,p+'.')))}
-else box.append(field(o,k,p,inBase))}
-box.append(adder(o));return box}
-function field(o,k,p,inBase){const v=o[k];let inp;
-if(choices[p]){inp=el('select');for(const c of choices[p])inp.append(el('option',{value:c,textContent:c,selected:c==v}));inp.onchange=()=>o[k]=inp.value}
-else if(typeof v=='boolean'){inp=el('input',{type:'checkbox',checked:v});inp.onchange=()=>o[k]=inp.checked}
-else if(typeof v=='number'){inp=el('input',{type:'number',step:'any',value:v});inp.oninput=()=>{if(inp.value!=='')o[k]=Number(inp.value)}}
-else if(Array.isArray(v)){inp=el('input',{value:JSON.stringify(v)});inp.oninput=()=>{try{o[k]=JSON.parse(inp.value);inp.style.outline=''}catch(e){inp.style.outline='2px solid red'}}}
-else{const s=/PSK|PASSWORD/i.test(k);inp=el('input',{type:s?'password':'text',value:v==null?'':v});if(s){inp.onfocus=()=>inp.type='text';inp.onblur=()=>inp.type='password'}inp.oninput=()=>o[k]=inp.value}
-const lab=el('label',{textContent:k});if(rk.includes(p))lab.append(el('span',{className:'r',textContent:'↻',title:'Takes effect after a restart'}));
-const row=el('div',{className:'row'},lab,inp);if(!inBase)row.append(delBtn(o,k));return row}
-function adder(o){const n=el('input',{placeholder:'new setting name'}),t=el('select');
+cfg=d.config;base=d.base;choices=d.choices;rk=d.restart_keys;setDirty(false);render();msg('')}
+function discard(){if(!dirty||confirm('Discard unsaved changes?'))loadConfig()}
+function render(){$('#cfg').replaceChildren(group(cfg,base,''))}
+function setAll(open){document.querySelectorAll('#cfg details').forEach(d=>d.open=open)}
+// settings first, then sub-sections, each alphabetical
+function keysOf(o){return Object.keys(o).sort((a,b)=>(isObj(o[a])-isObj(o[b]))||a.localeCompare(b))}
+function badge(){return el('span',{className:'r',textContent:'↻',title:'Takes effect after a restart'})}
+function group(o,b,path){const box=el('div',{className:'grp'});
+for(const k of keysOf(o)){const p=path+k,inBase=isObj(b)&&k in b;
+box.append(isObj(o[k])?section(o,k,p,inBase?b[k]:null,inBase):field(o,k,p,inBase))}
+box.append(adder(o,path));return box}
+function section(o,k,p,b,inBase){const d=el('details',{className:'sec',open:!closed.has(p)});
+d.ontoggle=()=>{d.open?closed.delete(p):closed.add(p)};const n=Object.keys(o[k]).length;
+const s=el('summary',{},el('span',{className:'chev',textContent:'▸'}),el('span',{textContent:k}),el('span',{className:'cnt',textContent:'('+n+')'}));
+if(rk.includes(p))s.append(badge());if(!inBase)s.append(delBtn(o,k,p));
+d.append(s,group(o[k],b,p+'.'));return d}
+function delBtn(o,k,p){return el('button',{className:'x d',textContent:'Remove',title:'Remove '+p,onclick:e=>{e.preventDefault();e.stopPropagation();
+if(isObj(o[k])&&Object.keys(o[k]).length&&!confirm('Remove '+p+' and everything in it?'))return;delete o[k];setDirty(true);render()}})}
+function field(o,k,p,inBase){const v=o[k],set=x=>{o[k]=x;setDirty(true)};let inp;
+if(choices[p]){inp=el('select');const opts=choices[p].includes(v)?choices[p]:[v,...choices[p]];
+for(const c of opts)inp.append(el('option',{value:c,textContent:c,selected:c==v}));inp.onchange=()=>set(inp.value)}
+else if(typeof v=='boolean'){inp=el('input',{type:'checkbox',checked:v});inp.onchange=()=>set(inp.checked)}
+else if(typeof v=='number'){inp=el('input',{type:'number',step:'any',value:v});inp.oninput=()=>{if(inp.value!=='')set(Number(inp.value))}}
+else if(Array.isArray(v)){inp=el('input',{value:JSON.stringify(v)});inp.oninput=()=>{try{set(JSON.parse(inp.value));inp.style.outline=''}catch(e){inp.style.outline='2px solid var(--bad)'}}}
+else{const s=/PSK|PASSWORD/i.test(k);inp=el('input',{type:s?'password':'text',value:v==null?'':v});
+if(s){inp.onfocus=()=>inp.type='text';inp.onblur=()=>inp.type='password'}inp.oninput=()=>set(inp.value)}
+inp.id='f_'+p;const lab=el('label',{textContent:k,htmlFor:inp.id,title:p});if(rk.includes(p))lab.append(badge());
+return el('div',{className:'row'},lab,inp,inBase?el('span'):delBtn(o,k,p))}
+function adder(o,path){const where=path?path.slice(0,-1):'top level';
+const open=el('button',{className:'addbtn',textContent:'+ Add to '+where});
+const n=el('input',{placeholder:'NEW_SETTING_NAME'}),t=el('select');
 for(const x of ['text','number','true/false','section'])t.append(el('option',{textContent:x}));
-const b=el('button',{textContent:'Add',onclick:()=>{const k=n.value.trim();if(!k)return msg('Enter a name for the new setting','err');
-if(k in o)return msg(k+' already exists','err');o[k]={text:'',number:0,'true/false':false,section:{}}[t.value];render();msg('Added '+k+' (not saved yet)')}});
-return el('div',{className:'row add'},n,t,b)}
+const add=el('button',{className:'p',textContent:'Add',onclick:()=>{const k=n.value.trim();
+if(!k)return msg('Enter a name for the new setting','err');if(k.includes('.'))return msg('Names cannot contain "."','err');
+if(k in o)return msg(path+k+' already exists','err');
+o[k]={text:'',number:0,'true/false':false,section:{}}[t.value];closed.delete(path+k);setDirty(true);render();msg('Added '+path+k+' (not saved yet)')}});
+const form=el('div',{className:'add',hidden:true},n,t,add,el('button',{textContent:'Cancel',onclick:()=>{form.hidden=true;open.hidden=false}}));
+open.onclick=()=>{form.hidden=false;open.hidden=true;n.focus()};n.onkeydown=e=>{if(e.key=='Enter')add.click()};
+return el('div',{},open,form)}
 async function save(andRestart){msg('Saving…');const d=await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
-if(!d.ok)return msg('Not saved: '+(d.errors||[]).join('; '),'err');
+if(!d.ok)return msg('Not saved: '+(d.errors||[]).join('; '),'err');setDirty(false);
 if(andRestart)return restart(null,true);
 msg(d.restart_required?'Saved. Some changes take effect after a restart.':'Saved and applied.','ok');loadInfo()}
-async function restart(path,skip){if(!skip&&!confirm('Restart the device?'))return;await api(path||'/api/restart',{method:'POST'});
+async function restart(path,skip){if(!skip&&!confirm('Restart the device?'))return;await api(path||'/api/restart',{method:'POST'});setDirty(false);
 msg('Restarting… this page reloads in 20 seconds. If the device changed networks, find it at http://'+host+'.local/','ok');setTimeout(()=>location.reload(),20000)}
 async function act(p,t){const d=await api(p,{method:'POST'});msg(d.ok?t:'Failed: '+(d.errors||[]).join('; '),d.ok?'ok':'err')}
 async function loadLogs(){const d=await api('/api/log');const l=$('#log');l.hidden=false;l.textContent=(d.error?'--- error.log ---\n'+d.error+'\n\n':'')+'--- run log ---\n'+(d.run||'')}
@@ -1143,6 +1257,8 @@ def run_setup_mode():
 def refresh_due():
     return FORCE_REFRESH or PIN_DATA is None or time.time() - LAST_REFRESH >= CONFIG['TIME_BETWEEN_CHECKS_M'] * 60
 
+
+
 def main_loop(initialized, clock):
     global PIN_DATA, LAST_REFRESH, FORCE_REFRESH
     log('Starting Main Loop', initialize=True)
@@ -1178,7 +1294,7 @@ def main_loop(initialized, clock):
 def main():
     global CONFIG_ERROR
     print('Starting up....')
-    intialized = False
+    initialized = False
     load_config()
     clock = is_clock()
     try:
@@ -1210,8 +1326,8 @@ def main():
         while True:
             wait(60)
     while True:
-        main_loop(intialized, clock)
+        main_loop(initialized, clock)
         delay()
-        intialized = True
+        initialized = True
 
 main()

@@ -109,24 +109,6 @@ CHOICES = {
     'TIME.TIMEZONE': [z[0] for z in TIMEZONE_LIST],
 }
 
-# Old flat config.json keys -> new location (None = obsolete, just remove). Applied once at load.
-LEGACY_KEYS = (
-    ('LED.TYPE', 'HARDWARE.TYPE'),
-    ('LED.RAIN_GPIO_PIN', 'HARDWARE.RAIN_GPIO_PIN'),
-    ('LED.TEMP_GPIO_PIN', 'HARDWARE.TEMP_GPIO_PIN'),
-    ('LED.OUTER_RING', 'HARDWARE.CLOCK_CONFIG.OUTER_RING'),
-    ('LED.INNER_RING', 'HARDWARE.CLOCK_CONFIG.INNER_RING'),
-    ('LED.CLOCK_FIRST_HOUR', 'HARDWARE.CLOCK_CONFIG.FIRST_HOUR'),
-    ('LED.CLOCK_DIRECTION', 'HARDWARE.CLOCK_CONFIG.DIRECTION'),
-    ('LED.CLOCK_RATIO', 'HARDWARE.CLOCK_CONFIG.RATIO'),
-    ('LED.CABLE_SIDE', 'HARDWARE.BAR_CONFIG.CABLE_SIDE'),
-    ('LED.TEMP_STRIP', 'HARDWARE.BAR_CONFIG.TEMPERATURE_STRIP'),
-    ('LED.FIRST_BAR_HOUR', 'HARDWARE.BAR_CONFIG.FIRST_HOUR'),
-    ('LED.TOTAL_COUNT', 'HARDWARE.BAR_CONFIG.TOTAL_COUNT'),
-    ('LOCATION.TIME_REGION', 'TIME.TIMEZONE'),
-    ('LED.YELLOW_THRESHOLD_START', None),
-    ('LED.RED_THRESHOLD_START', None),
-)
 MISSING = object()
 
 OFF = (0, 0, 0)
@@ -327,20 +309,6 @@ def del_path(config, path):
         return True
     return False
 
-def migrate_config(config):
-    # Move settings from the old flat LED layout into the nested one. Returns True if anything changed.
-    changed = False
-    for old, new in LEGACY_KEYS:
-        value = get_path(config, old, MISSING)
-        if value is MISSING:
-            continue
-        if new and get_path(config, new, MISSING) is MISSING:
-            set_path(config, new, value)
-            log(f'  >> Moved setting {old} to {new}')
-        del_path(config, old)
-        changed = True
-    return changed
-
 def merge_defaults(config, base):
     # Add any missing keys (at every level) from base into config. Returns True if anything was added.
     changed = False
@@ -377,8 +345,7 @@ def load_config():
     except Exception as e:
         log(f'Failed to load configuration ({e}), writing default config')
         config = {}
-    migrated = migrate_config(config)
-    if merge_defaults(config, BASE_CONFIG) or migrated:
+    if merge_defaults(config, BASE_CONFIG):
         write_config(config)
     CONFIG = config
 
@@ -1257,8 +1224,6 @@ def run_setup_mode():
 def refresh_due():
     return FORCE_REFRESH or PIN_DATA is None or time.time() - LAST_REFRESH >= CONFIG['TIME_BETWEEN_CHECKS_M'] * 60
 
-
-
 def main_loop(initialized, clock):
     global PIN_DATA, LAST_REFRESH, FORCE_REFRESH
     log('Starting Main Loop', initialize=True)
@@ -1274,7 +1239,7 @@ def main_loop(initialized, clock):
             send_map_to_leds(PIN_DATA)
             return
         FORCE_REFRESH = False
-        manage_wifi('connect')
+        manage_wifi('connect', useLEDs=useLEDs)
         validate_internet_connection(useLEDs=useLEDs)
         update_RTC(useLEDs)
         local_time_dst()
